@@ -1,0 +1,1888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Atomic Minds</title>
+<meta name="description" content="Atomic Minds — Stop Memorizing. Start realizing.">
+<meta name="theme-color" content="#12081c">
+
+<!-- PWA: installable on Android/desktop Chrome via manifest, and on iOS
+     via the apple-* meta tags below (iOS ignores manifest.json for
+     install purposes and needs its own tags). -->
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Atomic Minds">
+<meta name="mobile-web-app-capable" content="yes">
+
+<!-- ============================================================
+     MATHJAX — renders LaTeX like $F=ma$ or $$\int_0^1 x\,dx$$
+     anywhere question / note / solution text is shown.
+     ============================================================ -->
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+    svg: { fontCache: 'global' },
+    options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" defer></script>
+
+<!-- ============================================================
+     FIREBASE — compat SDK (simplest to use from one plain HTML
+     file with no build step). Auth + Firestore only — Storage is
+     intentionally not used (see README: Google now requires a
+     paid Blaze billing account for Storage; notes/assignments
+     use Google Drive links instead, completely free).
+     ============================================================ -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
+<style>
+/* ============================================================
+   ATOMIC MINDS THEME
+   Deep purple / near-black, matching the atom+brain brand mark.
+   System font stack on purpose — no webfont download, since many
+   students are on slow mobile data (seen in your screenshots).
+   ============================================================ */
+:root{
+  --bg:#12081c;
+  --surface:#1c1030;
+  --surface-2:#241539;
+  --border:#3a2a5c;
+  --border-soft:#2a1d47;
+  --accent:#9b8ce8;
+  --accent-bright:#7f77dd;
+  --text:#f3f0fa;
+  --text-muted:#a89ae0;
+  --text-dim:#7a6da8;
+  --success:#4ade80; --success-bg:rgba(34,197,94,.15); --success-brd:rgba(34,197,94,.35);
+  --danger:#f87171;  --danger-bg:rgba(239,68,68,.15);  --danger-brd:rgba(239,68,68,.35);
+  --warning:#fbbf24; --warning-bg:rgba(245,158,11,.15); --warning-brd:rgba(245,158,11,.35);
+  --radius:10px;
+  --radius-lg:16px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--font);
+  -webkit-tap-highlight-color:transparent;}
+body{min-height:100vh;font-size:15px;line-height:1.5}
+button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
+button{cursor:pointer}
+a{color:var(--accent)}
+img{max-width:100%}
+::selection{background:var(--accent-bright);color:#fff}
+
+#app{min-height:100vh;display:flex;flex-direction:column}
+
+/* -------- shared building blocks -------- */
+.container{max-width:480px;margin:0 auto;width:100%;padding:0 16px}
+.card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);padding:16px;margin-bottom:12px}
+.card-title{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--text)}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12px;color:var(--text-muted);margin-bottom:5px;font-weight:500}
+.field input,.field select,.field textarea{
+  width:100%;padding:10px 12px;border-radius:var(--radius);
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);outline:none;
+}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:80px;font-family:inherit}
+.field .hint{font-size:11px;color:var(--text-dim);margin-top:4px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;width:100%;
+  padding:11px;border-radius:var(--radius);border:1px solid transparent;font-size:14px;font-weight:600;}
+.btn-primary{background:var(--accent-bright);color:#150a1f}
+.btn-primary:hover{opacity:.92}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-ghost{background:var(--surface-2);color:var(--text-muted);border-color:var(--border)}
+.btn-danger{background:var(--danger-bg);color:var(--danger);border-color:var(--danger-brd)}
+.btn-success{background:var(--success-bg);color:var(--success);border-color:var(--success-brd)}
+.btn-sm{width:auto;padding:6px 12px;font-size:12px;font-weight:500;border-radius:8px}
+
+.badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.2px}
+.badge-free{background:var(--success-bg);color:var(--success)}
+.badge-paid{background:var(--warning-bg);color:var(--warning)}
+.badge-live{background:var(--danger-bg);color:var(--danger)}
+.badge-muted{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border)}
+.badge-accent{background:rgba(155,140,232,.15);color:var(--accent)}
+
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--text);color:var(--bg);padding:9px 18px;border-radius:24px;font-size:13px;font-weight:500;
+  opacity:0;pointer-events:none;transition:all .25s;z-index:999;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+.empty-state{text-align:center;padding:40px 20px;color:var(--text-dim)}
+.empty-state .icon{font-size:30px;margin-bottom:8px;opacity:.6}
+.spinner{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;
+  animation:spin .7s linear infinite;margin:24px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* -------- logo -------- */
+.logo-mark{display:block;margin:0 auto}
+.brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
+.brand-name{font-size:21px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
+.brand-tagline{font-size:12px;color:var(--text-muted);margin-top:2px}
+
+/* -------- auth screens -------- */
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 16px}
+.auth-card{width:100%;max-width:360px;background:var(--surface);border:1px solid var(--border-soft);
+  border-radius:20px;padding:28px 22px}
+.auth-tabs{display:flex;gap:4px;padding:4px;background:var(--bg);border-radius:12px;margin:22px 0 18px}
+.auth-tab{flex:1;padding:9px 4px;border:none;background:none;border-radius:9px;font-size:13px;font-weight:600;
+  color:var(--text-dim);transition:all .15s}
+.auth-tab.active{background:var(--surface-2);color:#fff;border:1px solid var(--border)}
+.auth-error{background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);
+  font-size:12px;padding:9px 12px;border-radius:8px;margin-bottom:12px;display:none}
+.auth-error.show{display:block}
+.auth-link{text-align:center;font-size:12px;color:var(--text-dim);margin-top:14px}
+.optional-toggle{text-align:center;font-size:12px;color:var(--accent);margin:6px 0 4px;cursor:pointer;user-select:none}
+.optional-fields{display:none;border-top:1px solid var(--border-soft);padding-top:12px;margin-top:4px}
+.optional-fields.show{display:block}
+.admin-link{position:fixed;bottom:10px;left:0;right:0;text-align:center;font-size:11px;color:var(--text-dim);
+  opacity:.6}
+
+/* -------- student shell (bottom tabs) -------- */
+.app-shell{display:flex;flex-direction:column;min-height:100vh}
+.top-header{position:sticky;top:0;z-index:20;background:rgba(18,8,28,.92);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border-soft);padding:12px 16px;display:flex;align-items:center;gap:10px}
+.top-header .logo-mark{margin:0}
+.top-header .th-name{font-size:15px;font-weight:600;flex:1}
+.content-area{flex:1;padding:16px;padding-bottom:90px;max-width:480px;margin:0 auto;width:100%}
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;background:rgba(28,16,48,.97);backdrop-filter:blur(10px);
+  border-top:1px solid var(--border-soft);display:flex;z-index:30;max-width:480px;margin:0 auto}
+.bottom-nav button{flex:1;background:none;border:none;padding:9px 2px 8px;display:flex;flex-direction:column;
+  align-items:center;gap:3px;color:var(--text-dim);font-size:10px;font-weight:500}
+.bottom-nav button.active{color:var(--accent)}
+.bottom-nav .bn-icon{font-size:19px}
+
+/* -------- admin shell (top tabs) -------- */
+.admin-shell{display:flex;flex-direction:column;min-height:100vh}
+.admin-header{position:sticky;top:0;z-index:20;background:rgba(18,8,28,.96);border-bottom:1px solid var(--border-soft);
+  padding:12px 16px}
+.admin-header-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.admin-tabs{display:flex;gap:4px;overflow-x:auto;padding-bottom:2px}
+.admin-tab{padding:7px 13px;border:1px solid var(--border);background:var(--surface-2);border-radius:20px;
+  font-size:12px;font-weight:600;color:var(--text-dim);white-space:nowrap}
+.admin-tab.active{background:rgba(155,140,232,.18);color:var(--accent);border-color:var(--accent)}
+.admin-content{flex:1;padding:16px;max-width:560px;margin:0 auto;width:100%}
+
+/* -------- rich content (MathJax / images / svg) -------- */
+.rich-content{font-size:14px;line-height:1.7;color:var(--text)}
+.rich-content img{border-radius:8px;margin:8px 0;display:block}
+.rich-content svg{max-width:100%}
+mjx-container{color:var(--text) !important}
+
+/* -------- item lists reused across tabs -------- */
+.item-card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:13px;margin-bottom:9px}
+.item-top{display:flex;gap:10px;align-items:flex-start}
+.item-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0;background:var(--surface-2)}
+.item-info{flex:1;min-width:0}
+.item-title{font-size:13.5px;font-weight:600}
+.item-meta{font-size:11px;color:var(--text-dim);margin-top:2px;line-height:1.6}
+.item-badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.item-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+
+/* -------- modal / overlay -------- */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;display:flex;align-items:flex-end;
+  justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.overlay.open{opacity:1;pointer-events:all}
+.sheet{background:var(--bg);border-radius:20px 20px 0 0;width:100%;max-width:480px;max-height:92vh;
+  overflow-y:auto;padding:16px 16px 28px;transform:translateY(40px);transition:transform .25s;
+  border:1px solid var(--border-soft);border-bottom:none}
+.overlay.open .sheet{transform:translateY(0)}
+.sheet-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 14px}
+.sheet-close{position:sticky;top:0;float:right;background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:8px;padding:5px 10px;font-size:12px}
+
+.tab-filter{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;margin-bottom:12px}
+.tab-filter button{padding:6px 13px;border:1px solid var(--border);background:none;border-radius:20px;
+  font-size:11.5px;color:var(--text-dim);white-space:nowrap}
+.tab-filter button.active{background:rgba(155,140,232,.15);color:var(--accent);border-color:var(--accent)}
+
+.search-input-wrap{position:relative;margin-bottom:10px}
+.search-input-wrap input{padding-left:34px}
+.search-input-wrap .si{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text-dim);font-size:14px}
+
+@media(min-width:481px){
+  .content-area,.bottom-nav{max-width:480px}
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center">
+    <div class="spinner"></div>
+  </div>
+</div>
+
+<div class="toast" id="toastEl"></div>
+
+<button id="pwaInstallBtn" style="position:fixed;top:12px;right:12px;z-index:200;display:none;
+  background:#7f77dd;color:#150a1f;border:none;border-radius:20px;padding:8px 15px;
+  font-size:12px;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.45);cursor:pointer;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  📲 Install App
+</button>
+
+<script>
+/* ================================================================
+   1) FIREBASE CONFIG
+   ----------------------------------------------------------------
+   Paste the config object from Firebase Console → Project settings
+   → General → Your apps → SDK setup and configuration.
+   This is safe to keep visible here — Firebase is designed for the
+   config to be public. Real security comes from firestore.rules
+   and storage.rules (separate files provided alongside this one).
+   ================================================================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyCBdvPx2RBlDJJI8A52hMfColisKEDD8RI",
+  authDomain: "atomic-minds-a3017.firebaseapp.com",
+  projectId: "atomic-minds-a3017",
+  storageBucket: "atomic-minds-a3017.firebasestorage.app",
+  messagingSenderId: "1099120272705",
+  appId: "1:1099120272705:web:ab8208f91d1bed12bb6dc0"
+};
+
+let auth, db;
+try{
+  if(typeof firebase === 'undefined'){
+    throw new Error('SDK_NOT_LOADED');
+  }
+  firebase.initializeApp(firebaseConfig);
+  auth = firebase.auth();
+  db = firebase.firestore();
+}catch(initErr){
+  console.error('Firebase init failed:', initErr);
+  const sdkMissing = initErr && initErr.message === 'SDK_NOT_LOADED';
+  const heading = sdkMissing ? 'The Firebase library didn\u2019t load' : 'Could not connect to Firebase';
+  const detail = sdkMissing
+    ? 'This page is being opened somewhere that blocks loading outside scripts (a local file preview, an in-app viewer, or no internet connection) \u2014 not a code problem.'
+    : (initErr && initErr.message ? initErr.message : 'Unknown error');
+  const hint = sdkMissing
+    ? 'Deploy this folder to Netlify (or any real https host) and open that live link \u2014 Firebase needs a real http/https address, not a file opened locally or through a preview app.'
+    : 'Check that this page is served over http/https (not opened by double-clicking the file), and that the firebaseConfig values above match your Firebase project exactly.';
+  document.getElementById('app').innerHTML =
+    '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:sans-serif;color:#f3f0fa;background:#12081c">' +
+    '<div><div style="font-size:15px;font-weight:700;margin-bottom:8px">' + heading + '</div>' +
+    '<div style="font-size:12px;color:#a89ae0;max-width:320px">' + detail + '</div>' +
+    '<div style="font-size:11px;color:#7a6da8;margin-top:14px;max-width:320px">' + hint + '</div>' +
+    '</div></div>';
+  throw initErr;
+}
+
+/* ================================================================
+   2) CONSTANTS & SMALL UTILITIES
+   ================================================================ */
+const COL = {
+  students: 'students',
+  admins: 'admins',
+  videos: 'videos',
+  liveClasses: 'liveClasses',
+  tests: 'tests',
+  testResults: 'testResults',
+  notes: 'notes',
+  payments: 'payments'
+};
+
+const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
+
+let CURRENT_USER = null;   // firebase auth user
+let CURRENT_PROFILE = null; // firestore student/admin doc data
+let CURRENT_ROLE = null;   // 'student' | 'admin'
+
+function $(sel, root){ return (root||document).querySelector(sel); }
+function $all(sel, root){ return Array.from((root||document).querySelectorAll(sel)); }
+function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstElementChild; }
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtDate(ts){
+  if(!ts) return '—';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+}
+function toast(msg){
+  const t = $('#toastEl');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._h);
+  t._h = setTimeout(()=>t.classList.remove('show'), 2400);
+}
+
+/* Renders text that may contain LaTeX ($...$), raw <img>, or raw <svg>.
+   Used for every question, solution, note description, admin note, etc.
+   A light allow-list strips <script> tags but keeps img/svg/formatting
+   so admin can paste chemistry structure images or hand-drawn SVGs. */
+function renderRich(container, raw){
+  if(!raw){ container.innerHTML=''; return; }
+  const cleaned = String(raw).replace(/<script[\s\S]*?<\/script>/gi,'');
+  container.innerHTML = cleaned;
+  if(window.MathJax && window.MathJax.typesetPromise){
+    window.MathJax.typesetPromise([container]).catch(()=>{});
+  }
+}
+
+/* Single-device login: a random ID is generated once per browser/device
+   and stored in localStorage. On login we compare it against the value
+   saved on the student's Firestore doc. If they differ, someone else's
+   device is already bound — login is blocked until admin resets it. */
+function getDeviceId(){
+  let id = localStorage.getItem('am_device_id');
+  if(!id){
+    id = 'dev_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem('am_device_id', id);
+  }
+  return id;
+}
+
+/* ================================================================
+   3) LOGO
+   ----------------------------------------------------------------
+   Hand-built inline SVG approximating the Atomic Minds mark (atom
+   orbits + bold "A" + brain in the counter + electron dot) so the
+   app needs zero image assets to look on-brand.
+
+   >>> If you want a pixel-perfect match to your real PNG logo,
+   >>> just replace the whole buildLogo() return value with:
+   >>>   `<img src="logo.png" alt="Atomic Minds" style="width:${size}px;height:${size}px">`
+   >>> and drop your logo.png next to this index.html file.
+   ================================================================ */
+function buildLogo(size){
+  size = size || 64;
+  return `<svg class="logo-mark" width="${size}" height="${size}" viewBox="0 0 100 100" aria-hidden="true">
+    <g stroke="#9b8ce8" stroke-width="2.2" fill="none" opacity=".9">
+      <ellipse cx="50" cy="52" rx="40" ry="16"/>
+      <ellipse cx="50" cy="52" rx="40" ry="16" transform="rotate(60 50 52)"/>
+      <ellipse cx="50" cy="52" rx="40" ry="16" transform="rotate(120 50 52)"/>
+    </g>
+    <circle cx="15" cy="70" r="3.4" fill="#9b8ce8"/>
+    <g stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M50,14 L19,88"/>
+      <path d="M50,14 L81,88"/>
+    </g>
+    <g fill="#c3b8f5">
+      <path d="M50,37 C44,35 38,37 35,42 C32,47 33,53 37,57 C40,60 45,61 50,59 Z"/>
+      <path d="M50,37 C56,35 62,37 65,42 C68,47 67,53 63,57 C60,60 55,61 50,59 Z"/>
+    </g>
+    <g stroke="#150a1f" stroke-width="1.1" fill="none" stroke-linecap="round">
+      <path d="M50,38 L50,59"/>
+      <path d="M40,45 Q43,47 41,51"/>
+      <path d="M44,41 Q46,44 44,48"/>
+      <path d="M60,45 Q57,47 59,51"/>
+      <path d="M56,41 Q54,44 56,48"/>
+    </g>
+  </svg>`;
+}
+
+/* ================================================================
+   4) APP STATE + ROUTER
+   ================================================================ */
+const STATE = {
+  screen: 'loading',      // loading | auth | adminLogin | student | admin
+  authMode: 'login',      // login | register
+  studentTab: 'dashboard', // dashboard | classes | tests | notes | profile
+  classesSubTab: 'recorded',
+  adminTab: 'students',
+  testResultCache: {}
+};
+
+function renderScreen(){
+  if(typeof clearUnsubs === 'function') clearUnsubs();
+  const app = $('#app');
+  app.innerHTML = '';
+  try{
+    if(STATE.screen === 'loading'){
+      app.appendChild(el(`<div style="min-height:100vh;display:flex;align-items:center;justify-content:center"><div class="spinner"></div></div>`));
+    } else if(STATE.screen === 'auth'){
+      app.appendChild(renderAuthScreen());
+    } else if(STATE.screen === 'adminLogin'){
+      app.appendChild(renderAdminLoginScreen());
+    } else if(STATE.screen === 'student'){
+      app.appendChild(renderStudentShell());
+    } else if(STATE.screen === 'admin'){
+      app.appendChild(renderAdminShell());
+    }
+  }catch(renderErr){
+    console.error('Render failed:', renderErr);
+    app.innerHTML = '';
+    app.appendChild(el(`
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center">
+        <div>
+          <div style="font-size:15px;font-weight:700;margin-bottom:8px">Something went wrong on this screen</div>
+          <div style="font-size:12px;color:var(--text-muted);max-width:320px;margin:0 auto">${esc(renderErr && renderErr.message ? renderErr.message : 'Unknown error')}</div>
+          <button class="btn btn-primary" style="margin-top:16px;width:auto;padding:10px 20px" id="recoverReloadBtn">↻ Reload app</button>
+        </div>
+      </div>
+    `));
+    const rb = $('#recoverReloadBtn', app);
+    if(rb) rb.addEventListener('click', ()=> location.reload());
+  }
+}
+
+/* ================================================================
+   5) AUTH SCREENS
+   ================================================================ */
+function renderAuthScreen(){
+  const wrap = el(`<div class="auth-wrap"><div class="auth-card"></div></div>`);
+  const card = $('.auth-card', wrap);
+
+  card.appendChild(el(`
+    <div class="brand-row">
+      ${buildLogo(64)}
+      <div class="brand-name">${BRAND.name}</div>
+      <div class="brand-tagline">${BRAND.tagline}</div>
+    </div>
+  `));
+
+  const tabs = el(`
+    <div class="auth-tabs">
+      <button class="auth-tab ${STATE.authMode==='login'?'active':''}" data-mode="login">Log in</button>
+      <button class="auth-tab ${STATE.authMode==='register'?'active':''}" data-mode="register">Register</button>
+    </div>
+  `);
+  tabs.addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    STATE.authMode = b.dataset.mode;
+    renderScreen();
+  });
+  card.appendChild(tabs);
+
+  if(STATE.justRegistered && STATE.authMode === 'login'){
+    card.appendChild(el(`<div style="background:var(--success-bg);border:1px solid var(--success-brd);color:var(--success);font-size:12.5px;padding:10px 12px;border-radius:8px;margin-bottom:12px">✅ Registration successful! Please log in below.</div>`));
+    STATE.justRegistered = false;
+  }
+
+  const errBox = el(`<div class="auth-error"></div>`);
+  card.appendChild(errBox);
+
+  if(STATE.authMode === 'login'){
+    const form = el(`
+      <form id="loginForm">
+        <div class="field"><label>Email</label><input type="email" id="liEmail" required placeholder="you@example.com"></div>
+        <div class="field"><label>Password</label><input type="password" id="liPass" required placeholder="••••••••"></div>
+        <button class="btn btn-primary" type="submit" id="liBtn">Log in</button>
+      </form>
+    `);
+    form.addEventListener('submit', async e=>{
+      e.preventDefault();
+      errBox.classList.remove('show');
+      const btn = $('#liBtn', form); btn.disabled = true; btn.textContent = 'Logging in…';
+      try{
+        await doLogin($('#liEmail',form).value.trim(), $('#liPass',form).value);
+      }catch(err){
+        errBox.textContent = friendlyAuthError(err);
+        errBox.classList.add('show');
+      }
+      btn.disabled = false; btn.textContent = 'Log in';
+    });
+    card.appendChild(form);
+    card.appendChild(el(`<div class="auth-link">New here? Tap Register above to create a free account.</div>`));
+  } else {
+    const form = el(`
+      <form id="regForm">
+        <div class="field"><label>Full name *</label><input type="text" id="rName" required placeholder="Your full name"></div>
+        <div class="field"><label>Email *</label><input type="email" id="rEmail" required placeholder="you@example.com"></div>
+        <div class="field"><label>Phone number *</label><input type="tel" id="rPhone" required placeholder="10-digit mobile number"></div>
+        <div class="field"><label>Password *</label><input type="password" id="rPass" required placeholder="Minimum 6 characters"></div>
+        <div class="optional-toggle" id="optToggle">+ Add class, batch, location &amp; more (optional)</div>
+        <div class="optional-fields" id="optFields">
+          <div class="row2">
+            <div class="field"><label>Class</label><input type="text" id="rClass" placeholder="e.g. 12"></div>
+            <div class="field"><label>Batch</label><input type="text" id="rBatch" placeholder="e.g. Physics 2026"></div>
+          </div>
+          <div class="field"><label>Location</label><input type="text" id="rLocation" placeholder="e.g. Duttapukur"></div>
+          <div class="row2">
+            <div class="field"><label>School</label><input type="text" id="rSchool" placeholder="School name"></div>
+            <div class="field"><label>Date of birth</label><input type="date" id="rDob"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Guardian name</label><input type="text" id="rGName" placeholder="Parent/guardian name"></div>
+            <div class="field"><label>Guardian phone</label><input type="tel" id="rGPhone" placeholder="Guardian's number"></div>
+          </div>
+        </div>
+        <button class="btn btn-primary" type="submit" id="regBtn" style="margin-top:4px">Create free account</button>
+      </form>
+    `);
+    $('#optToggle', form).addEventListener('click', ()=>{
+      $('#optFields', form).classList.toggle('show');
+    });
+    form.addEventListener('submit', async e=>{
+      e.preventDefault();
+      errBox.classList.remove('show');
+      const name = $('#rName',form).value.trim();
+      const email = $('#rEmail',form).value.trim();
+      const phone = $('#rPhone',form).value.trim();
+      const pass = $('#rPass',form).value;
+      if(!/^\d{10}$/.test(phone)){
+        errBox.textContent = 'Enter a valid 10-digit phone number.';
+        errBox.classList.add('show');
+        return;
+      }
+      const btn = $('#regBtn', form); btn.disabled = true; btn.textContent = 'Creating account…';
+      try{
+        await doRegister({
+          fullName:name, email, phone, password:pass,
+          class: $('#rClass',form).value.trim(),
+          batch: $('#rBatch',form).value.trim(),
+          location: $('#rLocation',form).value.trim(),
+          school: $('#rSchool',form).value.trim(),
+          dob: $('#rDob',form).value,
+          guardianName: $('#rGName',form).value.trim(),
+          guardianPhone: $('#rGPhone',form).value.trim(),
+        });
+      }catch(err){
+        errBox.textContent = friendlyAuthError(err);
+        errBox.classList.add('show');
+        btn.disabled = false; btn.textContent = 'Create free account';
+      }
+    });
+    card.appendChild(form);
+    card.appendChild(el(`<div class="auth-link">Free accounts can see demo &amp; free classes and tests right away.</div>`));
+  }
+
+  wrap.appendChild(el(`<div class="admin-link" id="adminLinkBtn">Admin login</div>`));
+  wrap.querySelector('#adminLinkBtn').addEventListener('click', ()=>{
+    STATE.screen = 'adminLogin';
+    renderScreen();
+  });
+  return wrap;
+}
+
+function renderAdminLoginScreen(){
+  const wrap = el(`<div class="auth-wrap"><div class="auth-card"></div></div>`);
+  const card = $('.auth-card', wrap);
+  card.appendChild(el(`
+    <div class="brand-row">
+      ${buildLogo(56)}
+      <div class="brand-name" style="font-size:17px">${BRAND.name} · Admin</div>
+      <div class="brand-tagline">Teacher &amp; owner panel</div>
+    </div>
+  `));
+  const errBox = el(`<div class="auth-error" style="margin-top:20px"></div>`);
+  card.appendChild(errBox);
+  const form = el(`
+    <form id="adminLoginForm">
+      <div class="field"><label>Admin email</label><input type="email" id="aEmail" required></div>
+      <div class="field"><label>Password</label><input type="password" id="aPass" required></div>
+      <button class="btn btn-primary" type="submit" id="aBtn">Log in as admin</button>
+    </form>
+  `);
+  form.addEventListener('submit', async e=>{
+    e.preventDefault();
+    errBox.classList.remove('show');
+    const btn = $('#aBtn',form); btn.disabled = true; btn.textContent = 'Checking…';
+    try{
+      await doAdminLogin($('#aEmail',form).value.trim(), $('#aPass',form).value);
+    }catch(err){
+      errBox.textContent = friendlyAuthError(err);
+      errBox.classList.add('show');
+    }
+    btn.disabled = false; btn.textContent = 'Log in as admin';
+  });
+  card.appendChild(form);
+  card.appendChild(el(`<div class="auth-link" id="backToStudent" style="cursor:pointer">← Back to student login</div>`));
+  card.querySelector('#backToStudent').addEventListener('click', ()=>{
+    STATE.screen = 'auth'; renderScreen();
+  });
+  return wrap;
+}
+
+function friendlyAuthError(err){
+  const code = err && err.code || '';
+  const map = {
+    'auth/email-already-in-use':'This email is already registered — try logging in instead.',
+    'auth/invalid-email':'Enter a valid email address.',
+    'auth/weak-password':'Password must be at least 6 characters.',
+    'auth/user-not-found':'No account found with this email.',
+    'auth/wrong-password':'Incorrect password.',
+    'auth/invalid-credential':'Incorrect email or password.',
+    'auth/too-many-requests':'Too many attempts. Please wait a bit and try again.',
+    'permission-denied':'Your account doesn\u2019t have permission for this yet \u2014 if you just set this up, make sure firestore.rules has been published in the Firebase console.'
+  };
+  return map[code] || (err && err.message) || 'Something went wrong. Please try again.';
+}
+
+/* ================================================================
+   6) AUTH ACTIONS
+   ================================================================ */
+async function doRegister(data){
+  const cred = await auth.createUserWithEmailAndPassword(data.email, data.password);
+  const uid = cred.user.uid;
+  await db.collection(COL.students).doc(uid).set({
+    fullName: data.fullName,
+    email: data.email,
+    phone: data.phone,
+    class: data.class || '',
+    batch: data.batch || '',
+    location: data.location || '',
+    school: data.school || '',
+    dob: data.dob || '',
+    guardianName: data.guardianName || '',
+    guardianPhone: data.guardianPhone || '',
+    membership: 'free',
+    membershipExpiry: null,
+    active: true,
+    deviceId: getDeviceId(),
+    watchMinutes: 0,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  // Sign back out immediately rather than silently auto-logging them in —
+  // show a clear success message and send them to the Log in tab instead.
+  // (Flags are set *before* signOut() because the auth-state listener's
+  // re-render can fire while signOut() is still resolving.)
+  STATE.authMode = 'login';
+  STATE.justRegistered = true;
+  await auth.signOut();
+}
+
+async function doLogin(email, password){
+  const cred = await auth.signInWithEmailAndPassword(email, password);
+  const uid = cred.user.uid;
+  const doc = await db.collection(COL.students).doc(uid).get();
+  if(!doc.exists){
+    await auth.signOut();
+    throw { code:'', message:'No student account found for this login. Are you trying the admin login instead?' };
+  }
+  const data = doc.data();
+  if(data.active === false){
+    await auth.signOut();
+    throw { code:'', message:'Your account has been deactivated. Please contact your teacher.' };
+  }
+  const myDevice = getDeviceId();
+  if(!data.deviceId){
+    await db.collection(COL.students).doc(uid).update({ deviceId: myDevice });
+  } else if(data.deviceId !== myDevice){
+    await auth.signOut();
+    throw { code:'', message:'This account is already logged in on another device. Ask your teacher to reset your device to log in here.' };
+  }
+  // onAuthStateChanged will pick this up and route to the student app.
+}
+
+async function doAdminLogin(email, password){
+  const cred = await auth.signInWithEmailAndPassword(email, password);
+  const uid = cred.user.uid;
+  const doc = await db.collection(COL.admins).doc(uid).get();
+  if(!doc.exists){
+    await auth.signOut();
+    throw { code:'', message:'This account is not authorized as admin.' };
+  }
+  // onAuthStateChanged will pick this up and route to the admin app.
+}
+
+function doLogout(){
+  auth.signOut();
+}
+
+/* ================================================================
+   7) AUTH STATE LISTENER — decides which screen to show
+   ================================================================ */
+auth.onAuthStateChanged(async (user) => {
+  CURRENT_USER = user;
+  if(!user){
+    CURRENT_PROFILE = null; CURRENT_ROLE = null;
+    STATE.screen = 'auth';
+    renderScreen();
+    return;
+  }
+  try{
+    const adminDoc = await db.collection(COL.admins).doc(user.uid).get();
+    if(adminDoc.exists){
+      CURRENT_ROLE = 'admin';
+      CURRENT_PROFILE = adminDoc.data();
+      STATE.screen = 'admin';
+      renderScreen();
+      return;
+    }
+    const studentDoc = await db.collection(COL.students).doc(user.uid).get();
+    if(studentDoc.exists && studentDoc.data().active !== false){
+      CURRENT_ROLE = 'student';
+      CURRENT_PROFILE = studentDoc.data();
+      STATE.screen = 'student';
+      renderScreen();
+      return;
+    }
+    // Neither admin nor active student — bounce back to login.
+    await auth.signOut();
+  }catch(e){
+    console.error(e);
+    await auth.signOut();
+  }
+});
+
+/* ================================================================
+   8) LIVE-LISTENER CLEANUP
+   ----------------------------------------------------------------
+   Every onSnapshot() started while building a screen is registered
+   here, and cleared right before the next full re-render — so
+   switching tabs never leaves old Firestore listeners running.
+   ================================================================ */
+STATE.unsubs = [];
+function trackUnsub(fn){ STATE.unsubs.push(fn); }
+function clearUnsubs(){ STATE.unsubs.forEach(u=>{ try{ u(); }catch(e){} }); STATE.unsubs = []; }
+
+/* ================================================================
+   9) STUDENT APP — Dashboard / Classes / Tests / Notes / Profile
+   ================================================================ */
+function renderStudentShell(){
+  const shell = el(`<div class="app-shell">
+    <div class="top-header">
+      ${buildLogo(30)}
+      <div class="th-name">${BRAND.name}</div>
+    </div>
+    <div class="content-area" id="studentContent"></div>
+    <div class="bottom-nav" id="studentNav">
+      <button data-tab="dashboard"><span class="bn-icon">🏠</span>Dashboard</button>
+      <button data-tab="classes"><span class="bn-icon">🎬</span>Classes</button>
+      <button data-tab="tests"><span class="bn-icon">📝</span>Tests</button>
+      <button data-tab="notes"><span class="bn-icon">📄</span>Notes</button>
+      <button data-tab="profile"><span class="bn-icon">👤</span>Profile</button>
+    </div>
+  </div>`);
+  const contentEl = $('#studentContent', shell);
+  if(STATE.studentTab==='dashboard') renderDashboardTab(contentEl);
+  else if(STATE.studentTab==='classes') renderClassesTab(contentEl);
+  else if(STATE.studentTab==='tests') renderTestsTab(contentEl);
+  else if(STATE.studentTab==='notes') renderNotesTab(contentEl);
+  else if(STATE.studentTab==='profile') renderProfileTab(contentEl);
+  $all('#studentNav button', shell).forEach(b=> b.classList.toggle('active', b.dataset.tab===STATE.studentTab));
+  $('#studentNav', shell).addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    STATE.studentTab = b.dataset.tab;
+    renderScreen();
+  });
+  return shell;
+}
+
+function renderDashboardTab(container){
+  const p = CURRENT_PROFILE;
+  const first = (p.fullName||'Student').split(' ')[0];
+  container.appendChild(el(`
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:17px;font-weight:700">Hi, ${esc(first)} 👋</div>
+        ${p.membership==='paid' ? '<span class="badge badge-paid">⭐ PAID</span>' : '<span class="badge badge-free">FREE</span>'}
+      </div>
+      <div style="font-size:12px;color:var(--text-muted)">${esc(p.batch||'No batch assigned yet')}${p.class?(' · Class '+esc(p.class)):''}</div>
+    </div>
+  `));
+  const links = el(`
+    <div class="card">
+      <div class="card-title">📌 Quick links</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="classes">🎬 Go to Classes</button>
+        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="tests">📝 Go to Tests</button>
+        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="notes">📄 Go to Notes &amp; Assignments</button>
+      </div>
+    </div>
+  `);
+  links.addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    STATE.studentTab = b.dataset.go;
+    renderScreen();
+  });
+  container.appendChild(links);
+  if(p.membership !== 'paid'){
+    container.appendChild(el(`
+      <div class="card" style="border-color:var(--accent)">
+        <div class="card-title">⭐ Go Paid</div>
+        <div style="font-size:12px;color:var(--text-muted)">Unlock paid-only classes, notes and tests. Ask your teacher to upgrade your account.</div>
+      </div>
+    `));
+  }
+}
+
+function renderClassesTab(container){
+  const subTabs = el(`<div class="tab-filter">
+    <button data-sub="recorded">📹 Recorded</button>
+    <button data-sub="live">🔴 Live Class</button>
+  </div>`);
+  $all('button', subTabs).forEach(b=> b.classList.toggle('active', b.dataset.sub===STATE.classesSubTab));
+  subTabs.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    STATE.classesSubTab = b.dataset.sub;
+    renderScreen();
+  });
+  container.appendChild(subTabs);
+
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+  const myBatch = CURRENT_PROFILE.batch || '';
+
+  if(STATE.classesSubTab === 'recorded'){
+    const unsub = db.collection(COL.videos).onSnapshot(snap=>{
+      const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
+      const mine = items.filter(v => !v.batch || v.batch===myBatch || v.batch==='All batches');
+      renderVideoList(listBox, mine);
+    }, err=> console.error(err));
+    trackUnsub(unsub);
+  } else {
+    const unsub = db.collection(COL.liveClasses).onSnapshot(snap=>{
+      const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
+      const mine = items.filter(v => !v.batch || v.batch===myBatch || v.batch==='All batches');
+      mine.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
+      renderLiveList(listBox, mine);
+    }, err=> console.error(err));
+    trackUnsub(unsub);
+  }
+}
+
+function renderVideoList(box, items){
+  box.innerHTML = '';
+  if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">🎬</div>No recorded classes yet.</div>`)); return; }
+  items.forEach(v=>{
+    const locked = v.access==='paid' && CURRENT_PROFILE.membership!=='paid';
+    const card = el(`
+      <div class="item-card" style="${locked?'opacity:.55':''}">
+        <div class="item-top">
+          <div class="item-icon">${locked?'🔒':'▶️'}</div>
+          <div class="item-info">
+            <div class="item-title">${esc(v.title||'Untitled class')}</div>
+            <div class="item-meta">${esc(v.subject||'')}${v.classNo?(' · Class '+esc(v.classNo)):''}${v.chapter?(' · '+esc(v.chapter)):''}${v.duration?(' · '+esc(v.duration)):''}</div>
+            <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'⭐ Paid':'Free'}</span></div>
+          </div>
+        </div>
+      </div>`);
+    card.addEventListener('click', ()=>{
+      if(locked){ toast('This class is for paid students. Ask your teacher to upgrade you.'); return; }
+      openVideoPlayer(v);
+    });
+    box.appendChild(card);
+  });
+}
+
+function renderLiveList(box, items){
+  box.innerHTML='';
+  if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">🔴</div>No live classes scheduled.</div>`)); return; }
+  items.forEach(lc=>{
+    const statusBadge = lc.status==='live' ? `<span class="badge badge-live">🔴 Live now</span>`
+      : lc.status==='ended' ? `<span class="badge badge-muted">Ended</span>`
+      : `<span class="badge badge-accent">📅 Upcoming</span>`;
+    const locked = lc.access==='paid' && CURRENT_PROFILE.membership!=='paid';
+    const card = el(`
+      <div class="item-card">
+        <div class="item-top">
+          <div class="item-icon">${lc.status==='live'?'🔴':lc.status==='ended'?'✅':'📅'}</div>
+          <div class="item-info">
+            <div class="item-title">${esc(lc.title||'Live class')}</div>
+            <div class="item-meta">${esc(lc.date||'')}${lc.time?(' · '+esc(lc.time)):''}${lc.subject?(' · '+esc(lc.subject)):''}</div>
+            <div class="item-badges">${statusBadge}</div>
+          </div>
+        </div>
+        ${lc.status==='live' && !locked ? `<button class="btn btn-danger" style="margin-top:10px">🎥 Join Live Class Now</button>` : ''}
+        ${lc.status==='live' && locked ? `<div style="margin-top:10px;font-size:11px;color:var(--text-dim)">🔒 Paid students only</div>` : ''}
+      </div>`);
+    if(lc.status==='live' && !locked){
+      $('button',card).addEventListener('click', ()=>{
+        if(lc.meetLink) window.open(lc.meetLink,'_blank');
+        else toast('Meet link not set yet.');
+      });
+    }
+    box.appendChild(card);
+  });
+}
+
+function openVideoPlayer(v){
+  const overlay = el(`
+    <div class="overlay open">
+      <div class="sheet" style="padding:0;max-height:96vh">
+        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft)">
+          <button class="btn btn-ghost btn-sm" id="closePlayer">✕ Close</button>
+          <div style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.title||'')}</div>
+        </div>
+        <div style="aspect-ratio:16/9;background:#000">
+          <iframe width="100%" height="100%" style="border:none;display:block" src="https://www.youtube.com/embed/${esc(v.ytId||'')}?autoplay=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+        </div>
+        <div style="padding:12px 14px;font-size:11px;color:var(--text-dim)">Your watch time is saved automatically.</div>
+      </div>
+    </div>`);
+  document.body.appendChild(overlay);
+  const timer = setInterval(()=>{
+    db.collection(COL.students).doc(CURRENT_USER.uid).update({
+      watchMinutes: firebase.firestore.FieldValue.increment(0.5)
+    }).catch(()=>{});
+  }, 30000);
+  $('#closePlayer', overlay).addEventListener('click', ()=>{ clearInterval(timer); overlay.remove(); });
+}
+
+function renderTestsTab(container){
+  const filterRow = el(`<div class="tab-filter">
+    <button data-f="all">All</button>
+    <button data-f="live">🔴 Live</button>
+    <button data-f="selfpaced">⏱ Self-paced</button>
+    <button data-f="practice">📚 Practice</button>
+  </div>`);
+  container.appendChild(filterRow);
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+
+  let currentFilter = 'all';
+  $all('button', filterRow).forEach(b=> b.classList.toggle('active', b.dataset.f===currentFilter));
+  filterRow.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    currentFilter = b.dataset.f;
+    $all('button',filterRow).forEach(x=>x.classList.toggle('active', x===b));
+    applyFilter();
+  });
+
+  let allTests = [];
+  let myResults = {};
+  const myBatch = CURRENT_PROFILE.batch || '';
+
+  db.collection(COL.testResults).where('studentId','==',CURRENT_USER.uid).get().then(snap=>{
+    myResults = {};
+    snap.forEach(d=>{ const r=d.data(); myResults[r.testId] = r; });
+    applyFilter();
+  }).catch(()=>{});
+
+  const unsub = db.collection(COL.tests).onSnapshot(snap=>{
+    allTests = []; snap.forEach(d=> allTests.push({id:d.id, ...d.data()}));
+    allTests = allTests.filter(t => !t.batch || t.batch===myBatch || t.batch==='All batches');
+    applyFilter();
+  });
+  trackUnsub(unsub);
+
+  function applyFilter(){
+    const filtered = currentFilter==='all' ? allTests : allTests.filter(t=>t.type===currentFilter);
+    renderTestList(listBox, filtered, myResults);
+  }
+}
+
+function renderTestList(box, tests, myResults){
+  box.innerHTML='';
+  if(!tests.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📝</div>No tests here yet.</div>`)); return; }
+  tests.forEach(t=>{
+    const locked = t.access==='paid' && CURRENT_PROFILE.membership!=='paid';
+    const r = myResults[t.id];
+    const typeIcon = t.type==='live' ? '🔴' : t.type==='selfpaced' ? '⏱' : '📚';
+    const card = el(`
+      <div class="item-card" style="${locked?'opacity:.55':''}">
+        <div class="item-top">
+          <div class="item-icon">${locked?'🔒':typeIcon}</div>
+          <div class="item-info">
+            <div class="item-title">${esc(t.title||'Untitled test')}</div>
+            <div class="item-meta">${esc(t.subject||'')}${t.duration?(' · '+t.duration+' min'):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
+            <div class="item-badges">
+              <span class="badge badge-accent">${typeIcon} ${t.type==='live'?'Live':t.type==='selfpaced'?'Self-paced':'Practice'}</span>
+              ${t.access==='paid'?'<span class="badge badge-paid">⭐ Paid</span>':''}
+              ${r?`<span class="badge badge-muted">${r.score}/${r.total}</span>`:''}
+            </div>
+          </div>
+        </div>
+      </div>`);
+    card.addEventListener('click', ()=>{
+      if(locked){ toast('This test is for paid students.'); return; }
+      openTestPlayer(t);
+    });
+    box.appendChild(card);
+  });
+}
+
+function openTestPlayer(t){
+  const overlay = el(`
+    <div class="overlay open">
+      <div class="sheet" style="padding:0;max-height:96vh;display:flex;flex-direction:column">
+        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft)">
+          <button class="btn btn-ghost btn-sm" id="closeTest">✕ Close</button>
+          <div style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title||'')}</div>
+        </div>
+        <iframe id="testIframe" style="width:100%;height:72vh;border:none;background:#0d1117"></iframe>
+      </div>
+    </div>`);
+  document.body.appendChild(overlay);
+  const frame = $('#testIframe', overlay);
+  frame.srcdoc = t.htmlContent || '<p style="font-family:sans-serif;padding:20px;color:#888">No content in this test yet.</p>';
+
+  function onMsg(e){
+    if(e.data && e.data.type === 'submit_test'){
+      saveTestResult(t, e.data.score, e.data.total);
+      window.removeEventListener('message', onMsg);
+    }
+  }
+  window.addEventListener('message', onMsg);
+  $('#closeTest', overlay).addEventListener('click', ()=>{
+    window.removeEventListener('message', onMsg);
+    overlay.remove();
+  });
+}
+
+async function saveTestResult(t, score, total){
+  try{
+    await db.collection(COL.testResults).add({
+      testId: t.id, testTitle: t.title||'', studentId: CURRENT_USER.uid,
+      studentName: CURRENT_PROFILE.fullName||'', score, total,
+      submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast(`Score saved: ${score}/${total}`);
+  }catch(e){
+    console.error(e);
+    toast('Could not save result — check your connection.');
+  }
+}
+
+function renderNotesTab(container){
+  const filterRow = el(`<div class="tab-filter">
+    <button data-f="all">All</button>
+    <button data-f="study">Notes</button>
+    <button data-f="assignment">Assignments</button>
+  </div>`);
+  container.appendChild(filterRow);
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+
+  let currentFilter='all', allNotes=[];
+  const myBatch = CURRENT_PROFILE.batch||'';
+  $all('button', filterRow).forEach(b=> b.classList.toggle('active', b.dataset.f===currentFilter));
+  filterRow.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    currentFilter=b.dataset.f;
+    $all('button',filterRow).forEach(x=>x.classList.toggle('active',x===b));
+    apply();
+  });
+  const unsub = db.collection(COL.notes).onSnapshot(snap=>{
+    allNotes=[]; snap.forEach(d=>allNotes.push({id:d.id,...d.data()}));
+    allNotes = allNotes.filter(n=> !n.batch || n.batch===myBatch || n.batch==='All batches');
+    apply();
+  });
+  trackUnsub(unsub);
+  function apply(){
+    const filtered = currentFilter==='all'?allNotes:allNotes.filter(n=>n.fileType===currentFilter);
+    renderNotesList(listBox, filtered);
+  }
+}
+
+function renderNotesList(box, items){
+  box.innerHTML='';
+  if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📄</div>No files here yet.</div>`)); return; }
+  items.forEach(n=>{
+    const locked = n.paidOnly && CURRENT_PROFILE.membership!=='paid';
+    const card = el(`
+      <div class="item-card" style="${locked?'opacity:.55':''}">
+        <div class="item-top">
+          <div class="item-icon">${locked?'🔒':n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div>
+          <div class="item-info">
+            <div class="item-title">${esc(n.title||'Untitled file')}</div>
+            <div class="item-meta">${esc(n.subject||'')}${n.size?(' · '+n.size):''}</div>
+            <div class="item-badges">
+              <span class="badge ${n.fileType==='assignment'?'badge-accent':n.downloadable?'badge-free':'badge-paid'}">
+                ${n.fileType==='assignment'?'Assignment':n.downloadable?'Downloadable':'View-only'}
+              </span>
+              ${n.paidOnly?'<span class="badge badge-paid">⭐ Paid</span>':''}
+            </div>
+          </div>
+        </div>
+      </div>`);
+    card.addEventListener('click', ()=>{
+      if(locked){ toast('This file is for paid students.'); return; }
+      if(!n.driveId){ toast('File link not set yet.'); return; }
+      if(n.downloadable){ window.open(n.driveLink || ('https://drive.google.com/file/d/'+n.driveId+'/view'), '_blank'); }
+      else { openPdfViewer(n); }
+    });
+    box.appendChild(card);
+  });
+}
+
+/* Pulls the file ID out of any common Google Drive share-link format:
+   .../file/d/ID/view   or   ...?id=ID   or   .../open?id=ID */
+function driveIdFromUrl(url){
+  url = (url||'').trim();
+  let m = url.match(/\/file\/d\/([A-Za-z0-9_-]+)/);
+  if(m) return m[1];
+  m = url.match(/[?&]id=([A-Za-z0-9_-]+)/);
+  if(m) return m[1];
+  return url; // maybe they already pasted just the raw ID
+}
+
+function openPdfViewer(n){
+  const overlay = el(`
+    <div class="overlay open">
+      <div class="sheet" style="padding:0;max-height:96vh;display:flex;flex-direction:column">
+        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft)">
+          <button class="btn btn-ghost btn-sm" id="closePdf">✕ Close</button>
+          <div style="font-size:12px;font-weight:600;flex:1">${esc(n.title||'')}</div>
+        </div>
+        <iframe style="width:100%;height:76vh;border:none;background:#fff" src="https://drive.google.com/file/d/${esc(n.driveId)}/preview" allow="autoplay"></iframe>
+        <div style="padding:10px 14px;font-size:11px;color:var(--text-dim)">View-only file, served from Google Drive. To fully disable downloading (not just hide the button), turn on "Viewers can't download/print/copy" in Drive's own share settings for this file.</div>
+      </div>
+    </div>`);
+  document.body.appendChild(overlay);
+  $('#closePdf', overlay).addEventListener('click', ()=> overlay.remove());
+}
+
+function renderProfileTab(container){
+  const p = CURRENT_PROFILE;
+  const initials = (p.fullName||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  container.appendChild(el(`
+    <div class="card" style="text-align:center">
+      <div style="width:56px;height:56px;border-radius:50%;background:var(--accent-bright);display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;color:#150a1f;margin:0 auto 10px">${esc(initials)}</div>
+      <div style="font-size:17px;font-weight:700">${esc(p.fullName)}</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:2px">${esc(p.email)}</div>
+      <div style="margin-top:8px">${p.membership==='paid'?'<span class="badge badge-paid">⭐ PAID</span>':'<span class="badge badge-free">FREE</span>'}</div>
+    </div>
+  `));
+  container.appendChild(el(`
+    <div class="card">
+      <div class="card-title">👤 Your details</div>
+      <div style="font-size:12px;color:var(--text-muted);line-height:2">
+        Phone: <b style="color:var(--text)">${esc(p.phone||'—')}</b><br>
+        Class: <b style="color:var(--text)">${esc(p.class||'—')}</b><br>
+        Batch: <b style="color:var(--text)">${esc(p.batch||'—')}</b><br>
+        Location: <b style="color:var(--text)">${esc(p.location||'—')}</b><br>
+        School: <b style="color:var(--text)">${esc(p.school||'—')}</b><br>
+        Watch time: <b style="color:var(--text)">${Math.round(p.watchMinutes||0)} mins</b>
+      </div>
+    </div>
+  `));
+  container.appendChild(el(`
+    <div class="card">
+      <div class="card-title">💰 Payment history</div>
+      <div id="myPayments"><div class="spinner"></div></div>
+    </div>
+  `));
+  const unsub = db.collection(COL.students).doc(CURRENT_USER.uid).collection(COL.payments)
+    .orderBy('date','desc').onSnapshot(snap=>{
+      const box = $('#myPayments', container); if(!box) return;
+      if(snap.empty){ box.innerHTML = '<div style="font-size:12px;color:var(--text-dim)">No payments recorded yet.</div>'; return; }
+      box.innerHTML='';
+      snap.forEach(d=>{
+        const pay = d.data();
+        box.appendChild(el(`
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
+            <div><div style="font-weight:500">${esc(pay.description||'Payment')}</div><div style="color:var(--text-dim);font-size:11px">${fmtDate(pay.date)}${pay.mode?(' · '+esc(pay.mode)):''}</div></div>
+            <div style="text-align:right"><div style="font-weight:700">₹${esc(pay.amount||0)}</div><div style="font-size:10px;color:${pay.status==='Paid'?'var(--success)':'var(--warning)'}">${esc(pay.status||'')}</div></div>
+          </div>`));
+      });
+    }, err=>{ console.error(err); });
+  trackUnsub(unsub);
+  const logoutBtn = el(`<button class="btn btn-danger" style="margin-top:6px">🚪 Log out</button>`);
+  logoutBtn.addEventListener('click', doLogout);
+  container.appendChild(logoutBtn);
+}
+
+/* ================================================================
+   10) TEST HTML GENERATOR
+   ----------------------------------------------------------------
+   Turns structured question data from the admin's manual builder
+   into one self-contained HTML test file (with its own timer,
+   MathJax, palette and submit logic). Saved as a string in
+   Firestore and rendered for students via an iframe srcdoc.
+   ================================================================ */
+function buildTestHTML(meta, questions){
+  const qData = JSON.stringify(questions);
+  const correctMark = meta.correctMark ?? 4;
+  const wrongMark = meta.wrongMark ?? -1;
+  const durationSec = (meta.duration||0) * 60;
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script>window.MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']]}};<\/script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" defer><\/script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;padding:12px;font-size:14px}
+.header{background:#161b22;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0}
+.title{font-weight:700;font-size:14px}
+.timer{color:#ef4444;font-weight:700;font-family:monospace;font-size:16px}
+.palette{display:flex;flex-wrap:wrap;gap:5px;padding:10px 12px;background:#161b22;border-radius:10px;margin-bottom:10px}
+.pb{width:28px;height:28px;border-radius:6px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#1c2333;color:#8b949e}
+.pb.done{background:rgba(34,197,94,.3);color:#4ade80}
+.pb.cur{background:#7f77dd;color:#fff}
+.q-card{background:#161b22;border-radius:10px;padding:14px;margin-bottom:10px}
+.q-num{font-size:11px;color:#8b949e;margin-bottom:6px}
+.q-text{font-size:14px;margin-bottom:10px;line-height:1.6}
+.q-text img{max-width:100%;border-radius:6px;margin:6px 0}
+.opt{display:flex;gap:8px;align-items:center;padding:9px 10px;border:1px solid #30363d;border-radius:8px;margin-bottom:6px;cursor:pointer}
+.opt.sel{border-color:#7f77dd;background:rgba(127,119,221,.15)}
+.key{width:20px;height:20px;border-radius:50%;background:#0d1117;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0}
+.navrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.nb{padding:10px;border-radius:8px;border:none;font-weight:700;font-size:13px;cursor:pointer;background:#1c2333;color:#e6edf3}
+.submit{width:100%;padding:12px;background:#ef4444;color:#fff;border:none;border-radius:10px;font-weight:700;font-size:14px;cursor:pointer}
+.result{background:#161b22;border-radius:10px;padding:16px;text-align:center}
+.score{font-size:32px;font-weight:700;color:#7f77dd;margin:8px 0}
+.sol{background:#161b22;border-radius:10px;padding:12px;margin-top:10px}
+.sol.correct{border-left:3px solid #22c55e}
+.sol.wrong{border-left:3px solid #ef4444}
+.sol.skip{border-left:3px solid #6b7280}
+</style></head>
+<body oncontextmenu="return false">
+<div class="header"><div class="title">${meta.title?String(meta.title).replace(/</g,'&lt;'):'Test'}</div><div class="timer" id="tm">--:--</div></div>
+<div class="palette" id="palette"></div>
+<div id="quizArea"></div>
+<div class="navrow"><button class="nb" id="prevB">← Prev</button><button class="nb" id="nextB">Next →</button></div>
+<button class="submit" id="submitB">Submit Test</button>
+<div id="resultArea" style="display:none"></div>
+<script>
+const QUESTIONS = ${qData};
+const CORRECT_MARK = ${correctMark}, WRONG_MARK = ${wrongMark};
+let cur = 0;
+let answers = new Array(QUESTIONS.length).fill(-1);
+let secondsLeft = ${durationSec};
+let submitted = false;
+let timerHandle = null;
+
+function renderQ(){
+  const q = QUESTIONS[cur];
+  const keys=['A','B','C','D'];
+  document.getElementById('quizArea').innerHTML =
+    '<div class="q-card"><div class="q-num">Question '+(cur+1)+' of '+QUESTIONS.length+'</div>'+
+    '<div class="q-text">'+q.text+'</div>'+
+    q.opts.map((o,i)=>'<div class="opt '+(answers[cur]===i?'sel':'')+'" onclick="selectOpt('+i+')"><div class="key">'+keys[i]+'</div><div>'+o+'</div></div>').join('')+
+    '</div>';
+  if(window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([document.getElementById('quizArea')]);
+  renderPalette();
+}
+function selectOpt(i){ answers[cur]=i; renderQ(); }
+function renderPalette(){
+  document.getElementById('palette').innerHTML = QUESTIONS.map(function(_,i){
+    var cls = i===cur ? 'cur' : (answers[i]!==-1 ? 'done' : '');
+    return '<button class="pb '+cls+'" onclick="jump('+i+')">'+(i+1)+'</button>';
+  }).join('');
+}
+function jump(i){ cur=i; renderQ(); }
+document.getElementById('prevB').onclick=function(){ if(cur>0){cur--;renderQ();} };
+document.getElementById('nextB').onclick=function(){ if(cur<QUESTIONS.length-1){cur++;renderQ();} };
+document.getElementById('submitB').onclick=submitTest;
+
+function submitTest(){
+  if(submitted) return; submitted = true;
+  if(timerHandle) clearInterval(timerHandle);
+  var correct=0, wrong=0, skipped=0;
+  QUESTIONS.forEach(function(q,i){
+    if(answers[i]===-1) skipped++;
+    else if(answers[i]===q.correct) correct++;
+    else wrong++;
+  });
+  var score = correct*CORRECT_MARK + wrong*WRONG_MARK;
+  var total = QUESTIONS.length*CORRECT_MARK;
+  document.getElementById('quizArea').style.display='none';
+  document.querySelector('.palette').style.display='none';
+  document.querySelector('.navrow').style.display='none';
+  document.getElementById('submitB').style.display='none';
+  var keys=['A','B','C','D'];
+  var solHtml = QUESTIONS.map(function(q,i){
+    var a = answers[i];
+    var cls = a===-1?'skip':(a===q.correct?'correct':'wrong');
+    var statusText = a===-1?'Skipped':(a===q.correct?('Correct — '+keys[a]):('Your answer: '+keys[a]+' · Correct: '+keys[q.correct]));
+    return '<div class="sol '+cls+'"><div class="q-text">'+(i+1)+'. '+q.text+'</div><div style="font-size:12px;margin:6px 0;font-weight:700">'+statusText+'</div>'+(q.explain?'<div style="font-size:12px;color:#8b949e">'+q.explain+'</div>':'')+'</div>';
+  }).join('');
+  document.getElementById('resultArea').style.display='block';
+  document.getElementById('resultArea').innerHTML =
+    '<div class="result"><div style="font-size:13px;color:#8b949e">Your score</div><div class="score">'+score+'</div><div style="font-size:12px;color:#8b949e">out of '+total+' · '+correct+' correct, '+wrong+' wrong, '+skipped+' skipped</div></div>'+solHtml;
+  if(window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([document.getElementById('resultArea')]);
+  window.parent.postMessage({ type:'submit_test', score:score, total:total }, '*');
+}
+
+if(secondsLeft > 0){
+  timerHandle = setInterval(function(){
+    secondsLeft--;
+    var m = Math.floor(secondsLeft/60).toString().padStart(2,'0');
+    var s = (secondsLeft%60).toString().padStart(2,'0');
+    var t = document.getElementById('tm'); if(t) t.textContent = m+':'+s;
+    if(secondsLeft<=0){ submitTest(); }
+  }, 1000);
+} else {
+  document.getElementById('tm').textContent = 'No limit';
+}
+renderQ();
+<\/script>
+</body></html>`;
+}
+
+/* ================================================================
+   11) ADMIN APP — Students / Classes / Tests / Notes
+   ================================================================ */
+function renderAdminShell(){
+  const shell = el(`<div class="admin-shell">
+    <div class="admin-header">
+      <div class="admin-header-row">
+        ${buildLogo(28)}
+        <div style="font-size:14px;font-weight:700;flex:1">${BRAND.name} · Admin</div>
+        <button class="btn-sm btn-ghost" id="adminLogout">Log out</button>
+      </div>
+      <div class="admin-tabs" id="adminTabsRow">
+        <button data-t="students">👨‍🎓 Students</button>
+        <button data-t="classes">🎬 Classes</button>
+        <button data-t="tests">📝 Tests</button>
+        <button data-t="notes">📄 Notes</button>
+      </div>
+    </div>
+    <div class="admin-content" id="adminContent"></div>
+  </div>`);
+  $all('#adminTabsRow button', shell).forEach(b=> b.classList.toggle('active', b.dataset.t===STATE.adminTab));
+  $('#adminTabsRow', shell).addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    STATE.adminTab = b.dataset.t;
+    renderScreen();
+  });
+  $('#adminLogout', shell).addEventListener('click', doLogout);
+  const content = $('#adminContent', shell);
+  if(STATE.adminTab==='students') renderAdminStudents(content);
+  else if(STATE.adminTab==='classes') renderAdminClasses(content);
+  else if(STATE.adminTab==='tests') renderAdminTests(content);
+  else if(STATE.adminTab==='notes') renderAdminNotes(content);
+  return shell;
+}
+
+function renderAdminStudents(container){
+  container.appendChild(el(`<div class="search-input-wrap"><span class="si">🔍</span><input type="text" id="stuSearch" placeholder="Search by name or phone..."></div>`));
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+  let all = [];
+  const unsub = db.collection(COL.students).onSnapshot(snap=>{
+    all=[]; snap.forEach(d=>all.push({id:d.id,...d.data()}));
+    all.sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||''));
+    apply();
+  });
+  trackUnsub(unsub);
+  $('#stuSearch',container).addEventListener('input', apply);
+  function apply(){
+    const q = ($('#stuSearch',container)?.value||'').toLowerCase();
+    const filtered = all.filter(s=> !q || (s.fullName||'').toLowerCase().includes(q) || (s.phone||'').includes(q));
+    listBox.innerHTML='';
+    if(!filtered.length){ listBox.appendChild(el(`<div class="empty-state"><div class="icon">👨‍🎓</div>No students found.</div>`)); return; }
+    filtered.forEach(s=>{
+      const initials = (s.fullName||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+      const card = el(`
+        <div class="item-card">
+          <div class="item-top">
+            <div class="item-icon">${esc(initials)}</div>
+            <div class="item-info">
+              <div class="item-title">${esc(s.fullName)}</div>
+              <div class="item-meta">${esc(s.phone||'')}${s.batch?(' · '+esc(s.batch)):''}</div>
+              <div class="item-badges">
+                <span class="badge ${s.membership==='paid'?'badge-paid':'badge-free'}">${s.membership==='paid'?'⭐ Paid':'Free'}</span>
+                ${s.active===false?'<span class="badge badge-muted">Deactivated</span>':''}
+              </div>
+            </div>
+          </div>
+        </div>`);
+      card.addEventListener('click', ()=> openStudentDetail(s));
+      listBox.appendChild(card);
+    });
+  }
+}
+
+function openStudentDetail(s){
+  const overlay = el(`<div class="overlay open"><div class="sheet">
+    <div class="sheet-handle"></div><button class="sheet-close" id="closeDetail">✕</button><div style="clear:both"></div>
+    <div class="card">
+      <div style="font-size:16px;font-weight:700">${esc(s.fullName)}</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${esc(s.email||'')} · ${esc(s.phone||'')}</div>
+      <div style="font-size:12px;color:var(--text-muted);line-height:1.9">
+        Class: <b style="color:var(--text)">${esc(s.class||'—')}</b> · Batch: <b style="color:var(--text)">${esc(s.batch||'—')}</b><br>
+        Location: <b style="color:var(--text)">${esc(s.location||'—')}</b><br>
+        Guardian: <b style="color:var(--text)">${esc(s.guardianName||'—')}${s.guardianPhone?(' ('+esc(s.guardianPhone)+')'):''}</b><br>
+        Watch time: <b style="color:var(--text)">${Math.round(s.watchMinutes||0)} mins</b>
+      </div>
+      <div class="row2" style="margin-top:12px">
+        <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${s.active===false?'✅ Activate':'🚫 Deactivate'}</button>
+        <button class="btn btn-ghost" id="resetDevice">🔄 Reset device</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">⭐ Membership</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <b style="color:${s.membership==='paid'?'var(--warning)':'var(--success)'}">${(s.membership||'free').toUpperCase()}</b></div>
+      <div class="row2">
+        <button class="btn btn-success" id="setFree">Set Free</button>
+        <button class="btn" style="background:var(--warning-bg);color:var(--warning);border:1px solid var(--warning-brd)" id="setPaid">Set Paid</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">💰 Payment history</div>
+      <div id="detailPayments"></div>
+      <div class="row2" style="margin-top:8px">
+        <input type="text" id="payDesc" placeholder="Description">
+        <input type="number" id="payAmt" placeholder="Amount ₹">
+      </div>
+      <div class="row2" style="margin-top:8px">
+        <select id="payStatus"><option>Paid</option><option>Pending</option></select>
+        <select id="payMode"><option>Cash</option><option>UPI</option><option>Bank Transfer</option></select>
+      </div>
+      <button class="btn btn-primary" id="addPayment" style="margin-top:8px">+ Add Payment</button>
+    </div>
+  </div></div>`);
+  document.body.appendChild(overlay);
+  $('#closeDetail', overlay).addEventListener('click', ()=> overlay.remove());
+  $('#toggleActive', overlay).addEventListener('click', async ()=>{
+    await db.collection(COL.students).doc(s.id).update({ active: s.active===false });
+    toast(s.active===false ? 'Student activated' : 'Student deactivated'); overlay.remove();
+  });
+  $('#resetDevice', overlay).addEventListener('click', async ()=>{
+    await db.collection(COL.students).doc(s.id).update({ deviceId: '' });
+    toast('Device reset — student can log in on a new device now.');
+  });
+  $('#setFree', overlay).addEventListener('click', async ()=>{
+    await db.collection(COL.students).doc(s.id).update({ membership:'free' });
+    toast('Set to Free'); overlay.remove();
+  });
+  $('#setPaid', overlay).addEventListener('click', async ()=>{
+    await db.collection(COL.students).doc(s.id).update({ membership:'paid' });
+    toast('Set to Paid'); overlay.remove();
+  });
+  const payBox = $('#detailPayments', overlay);
+  db.collection(COL.students).doc(s.id).collection(COL.payments).orderBy('date','desc').get().then(snap=>{
+    if(snap.empty){ payBox.innerHTML='<div style="font-size:11px;color:var(--text-dim)">No payments yet.</div>'; return; }
+    payBox.innerHTML='';
+    snap.forEach(d=>{
+      const pay = d.data();
+      payBox.appendChild(el(`<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px solid var(--border-soft)">
+        <span>${esc(pay.description||'')} · ${fmtDate(pay.date)}</span><span>₹${esc(pay.amount||0)} · ${esc(pay.status||'')}</span></div>`));
+    });
+  });
+  $('#addPayment', overlay).addEventListener('click', async ()=>{
+    const desc = $('#payDesc',overlay).value.trim();
+    const amt = parseFloat($('#payAmt',overlay).value);
+    if(!desc || !amt){ toast('Fill description and amount'); return; }
+    await db.collection(COL.students).doc(s.id).collection(COL.payments).add({
+      description: desc, amount: amt, status: $('#payStatus',overlay).value, mode: $('#payMode',overlay).value,
+      date: firebase.firestore.Timestamp.now()
+    });
+    toast('Payment added'); overlay.remove();
+  });
+}
+
+function ytIdFromUrl(url){
+  const m = (url||'').match(/(?:youtu\.be\/|[?&]v=|\/embed\/|\/shorts\/)([A-Za-z0-9_-]{6,})/);
+  return m ? m[1] : (url||'').trim();
+}
+
+function renderAdminClasses(container){
+  const subTabs = el(`<div class="tab-filter"><button data-s="recorded">📹 Recorded</button><button data-s="live">🔴 Live Class</button></div>`);
+  container.appendChild(subTabs);
+  const body = el(`<div></div>`);
+  container.appendChild(body);
+  let sub = 'recorded';
+  $all('button',subTabs).forEach(b=> b.classList.toggle('active', b.dataset.s===sub));
+  subTabs.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    sub=b.dataset.s;
+    $all('button',subTabs).forEach(x=>x.classList.toggle('active',x===b));
+    draw();
+  });
+  function draw(){ body.innerHTML=''; if(sub==='recorded') drawRecordedForm(body); else drawLiveForm(body); }
+  draw();
+}
+
+function drawRecordedForm(body){
+  body.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title">➕ Add recorded lecture (YouTube unlisted)</div>
+      <div class="field"><label>YouTube link</label><input id="vUrl" placeholder="https://youtu.be/..."></div>
+      <div class="field"><label>Title</label><input id="vTitle" placeholder="Class 27 — Electric Current Part 01"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="vSubject" placeholder="Physics"></div>
+        <div class="field"><label>Batch</label><input id="vBatch" placeholder="Class 12 Physics 2026"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Chapter</label><input id="vChapter" placeholder="Electric Current"></div>
+        <div class="field"><label>Class no.</label><input id="vClassNo" placeholder="27"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Duration</label><input id="vDuration" placeholder="48:32"></div>
+        <div class="field"><label>Access</label><select id="vAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
+      </div>
+      <button class="btn btn-primary" id="saveVideo">💾 Save to Firebase</button>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">Uploaded videos</div>
+    <div id="videosAdminList"><div class="spinner"></div></div>
+  </div>`));
+  $('#saveVideo', body).addEventListener('click', async ()=>{
+    const url = $('#vUrl',body).value.trim();
+    const title = $('#vTitle',body).value.trim();
+    if(!url || !title){ toast('Fill link and title'); return; }
+    await db.collection(COL.videos).add({
+      ytId: ytIdFromUrl(url), title,
+      subject: $('#vSubject',body).value.trim(), batch: $('#vBatch',body).value.trim(),
+      chapter: $('#vChapter',body).value.trim(), classNo: $('#vClassNo',body).value.trim(),
+      duration: $('#vDuration',body).value.trim(), access: $('#vAccess',body).value,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast('Saved to Firebase!');
+    ['vUrl','vTitle','vChapter','vClassNo','vDuration'].forEach(id=> $('#'+id,body).value='');
+  });
+  const listBox = $('#videosAdminList', body);
+  const unsub = db.collection(COL.videos).onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No videos yet.</div>'; return; }
+    items.forEach(v=>{
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">▶️</div><div class="item-info">
+          <div class="item-title">${esc(v.title)}</div>
+          <div class="item-meta">${esc(v.subject||'')}${v.batch?(' · '+esc(v.batch)):''}</div>
+          <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'Paid':'Free'}</span></div>
+        </div></div>
+        <div class="item-actions"><button class="btn-sm btn-danger">🗑 Delete</button></div>
+      </div>`);
+      $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.videos).doc(v.id).delete(); toast('Deleted'); });
+      listBox.appendChild(card);
+    });
+  });
+  trackUnsub(unsub);
+}
+
+function drawLiveForm(body){
+  body.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title">➕ Schedule live class (Google Meet)</div>
+      <div class="field"><label>Google Meet link</label><input id="lUrl" placeholder="https://meet.google.com/xxx-xxxx-xxx"></div>
+      <div class="field"><label>Title</label><input id="lTitle" placeholder="Live Class 28 — EM Induction"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="lSubject" placeholder="Physics"></div>
+        <div class="field"><label>Batch</label><input id="lBatch" placeholder="Class 12 Physics 2026"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Date</label><input type="date" id="lDate"></div>
+        <div class="field"><label>Time</label><input type="time" id="lTime" value="17:00"></div>
+      </div>
+      <div class="field"><label>Access</label><select id="lAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
+      <button class="btn btn-primary" id="saveLive">💾 Save to Firebase</button>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">Scheduled classes</div>
+    <div id="liveAdminList"><div class="spinner"></div></div>
+  </div>`));
+  $('#saveLive', body).addEventListener('click', async ()=>{
+    const url = $('#lUrl',body).value.trim();
+    const title = $('#lTitle',body).value.trim();
+    if(!url || !title){ toast('Fill link and title'); return; }
+    await db.collection(COL.liveClasses).add({
+      meetLink: url, title, subject: $('#lSubject',body).value.trim(), batch: $('#lBatch',body).value.trim(),
+      date: $('#lDate',body).value, time: $('#lTime',body).value, access: $('#lAccess',body).value,
+      status: 'upcoming', createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast('Saved to Firebase!');
+    $('#lUrl',body).value=''; $('#lTitle',body).value='';
+  });
+  const listBox = $('#liveAdminList', body);
+  const unsub = db.collection(COL.liveClasses).onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No live classes yet.</div>'; return; }
+    items.forEach(lc=>{
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">${lc.status==='live'?'🔴':lc.status==='ended'?'✅':'📅'}</div><div class="item-info">
+          <div class="item-title">${esc(lc.title)}</div>
+          <div class="item-meta">${esc(lc.date||'')}${lc.time?(' · '+esc(lc.time)):''}</div>
+          <div class="item-badges"><span class="badge ${lc.status==='live'?'badge-live':'badge-muted'}">${esc(lc.status)}</span></div>
+        </div></div>
+        <div class="item-actions">
+          <button class="btn-sm btn-ghost" data-act="live">🔴 Mark Live</button>
+          <button class="btn-sm btn-ghost" data-act="ended">✅ Mark Ended</button>
+          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+        </div>
+      </div>`);
+      $all('button',card).forEach(b=> b.addEventListener('click', async ()=>{
+        if(b.dataset.act==='del'){ await db.collection(COL.liveClasses).doc(lc.id).delete(); toast('Deleted'); }
+        else { await db.collection(COL.liveClasses).doc(lc.id).update({status:b.dataset.act}); toast('Updated'); }
+      }));
+      listBox.appendChild(card);
+    });
+  });
+  trackUnsub(unsub);
+}
+
+function renderAdminTests(container){
+  const tabs = el(`<div class="tab-filter"><button data-s="manual">🛠 Manual builder</button><button data-s="paste">📋 Paste HTML</button></div>`);
+  container.appendChild(tabs);
+  const body = el(`<div></div>`);
+  container.appendChild(body);
+  let sub = 'manual';
+  $all('button',tabs).forEach(b=> b.classList.toggle('active', b.dataset.s===sub));
+  tabs.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    sub = b.dataset.s;
+    $all('button',tabs).forEach(x=>x.classList.toggle('active',x===b));
+    draw();
+  });
+  function draw(){ body.innerHTML=''; if(sub==='manual') drawManualBuilder(body); else drawPasteForm(body); }
+  draw();
+
+  container.appendChild(el(`<div class="card-title" style="margin:14px 0 8px">Published tests</div>`));
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+  const unsub = db.collection(COL.tests).onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No tests yet.</div>'; return; }
+    items.forEach(t=>{
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">${t.type==='live'?'🔴':t.type==='selfpaced'?'⏱':'📚'}</div><div class="item-info">
+          <div class="item-title">${esc(t.title)}</div>
+          <div class="item-meta">${esc(t.subject||'')}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
+          <div class="item-badges"><span class="badge badge-accent">${esc(t.type)}</span>${t.access==='paid'?'<span class="badge badge-paid">Paid</span>':'<span class="badge badge-free">Free</span>'}</div>
+        </div></div>
+        <div class="item-actions">
+          <button class="btn-sm btn-ghost" data-act="results">📊 Results</button>
+          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+        </div>
+      </div>`);
+      $all('button',card).forEach(b=>b.addEventListener('click', async ()=>{
+        if(b.dataset.act==='del'){ await db.collection(COL.tests).doc(t.id).delete(); toast('Deleted'); }
+        else { openTestResults(t); }
+      }));
+      listBox.appendChild(card);
+    });
+  });
+  trackUnsub(unsub);
+}
+
+function openTestResults(t){
+  const overlay = el(`<div class="overlay open"><div class="sheet">
+    <div class="sheet-handle"></div><button class="sheet-close" id="closeRes">✕</button><div style="clear:both"></div>
+    <div class="card-title">📊 ${esc(t.title)} — results</div>
+    <div id="resList"><div class="spinner"></div></div>
+  </div></div>`);
+  document.body.appendChild(overlay);
+  $('#closeRes', overlay).addEventListener('click', ()=> overlay.remove());
+  db.collection(COL.testResults).where('testId','==',t.id).get().then(snap=>{
+    const box = $('#resList', overlay);
+    if(snap.empty){ box.innerHTML = '<div class="empty-state">No attempts yet.</div>'; return; }
+    let rows = []; snap.forEach(d=> rows.push(d.data()));
+    rows.sort((a,b)=> b.score - a.score);
+    box.innerHTML='';
+    rows.forEach((r,i)=>{
+      box.appendChild(el(`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
+        <span>#${i+1} ${esc(r.studentName||'Student')}</span><span style="font-weight:700">${esc(r.score)}/${esc(r.total)}</span></div>`));
+    });
+  });
+}
+
+function drawManualBuilder(body){
+  let questions = [];
+  body.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title">📋 Test details</div>
+      <div class="field"><label>Title</label><input id="mTitle" placeholder="Full Test - 01"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="mSubject" placeholder="Physics"></div>
+        <div class="field"><label>Batch</label><input id="mBatch" placeholder="Class 12 Physics 2026"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Type</label><select id="mType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice (no timer)</option></select></div>
+        <div class="field"><label>Duration (mins, 0 = no timer)</label><input type="number" id="mDuration" value="30"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Correct marks</label><input type="number" id="mCorrect" value="4"></div>
+        <div class="field"><label>Wrong marks</label><input type="number" id="mWrong" value="-1"></div>
+      </div>
+      <div class="field"><label>Access</label><select id="mAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
+    </div>
+    <div class="card">
+      <div class="card-title">❓ Questions <span id="qCountLbl" style="color:var(--text-dim);font-weight:400;font-size:11px">(0 added)</span></div>
+      <div id="mQList"></div>
+      <div class="field"><label>Question text — supports $LaTeX$, &lt;img src="..."&gt;, raw &lt;svg&gt;</label>
+        <textarea id="mQText" placeholder="e.g. What is $F = ma$ used to calculate? Or paste an &lt;img src='https://...'&gt; for a diagram / structure."></textarea>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Option A</label><input id="mOptA"></div>
+        <div class="field"><label>Option B</label><input id="mOptB"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Option C</label><input id="mOptC"></div>
+        <div class="field"><label>Option D</label><input id="mOptD"></div>
+      </div>
+      <div class="field"><label>Correct option</label><select id="mCorrectOpt"><option value="0">A</option><option value="1">B</option><option value="2">C</option><option value="3">D</option></select></div>
+      <div class="field"><label>Explanation (shown after submit)</label><textarea id="mExplain" placeholder="Why this is the correct answer..."></textarea></div>
+      <button class="btn btn-ghost" id="addQ">+ Add question</button>
+    </div>
+    <button class="btn btn-primary" id="publishManual">🚀 Generate &amp; publish test</button>
+  </div>`));
+
+  function refreshQList(){
+    $('#qCountLbl',body).textContent = '('+questions.length+' added)';
+    const box = $('#mQList',body); box.innerHTML='';
+    questions.forEach((q,i)=>{
+      const row = el(`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
+        <span>Q${i+1}. ${esc(q.text.slice(0,40))}${q.text.length>40?'…':''}</span><button class="btn-sm btn-danger">🗑</button></div>`);
+      $('button',row).addEventListener('click', ()=>{ questions.splice(i,1); refreshQList(); });
+      box.appendChild(row);
+    });
+  }
+  $('#addQ',body).addEventListener('click', ()=>{
+    const text = $('#mQText',body).value.trim();
+    const opts = [$('#mOptA',body).value.trim(), $('#mOptB',body).value.trim(), $('#mOptC',body).value.trim(), $('#mOptD',body).value.trim()];
+    if(!text || opts.some(o=>!o)){ toast('Fill question text and all 4 options'); return; }
+    questions.push({ text, opts, correct: parseInt($('#mCorrectOpt',body).value), explain: $('#mExplain',body).value.trim() });
+    $('#mQText',body).value=''; $('#mOptA',body).value=''; $('#mOptB',body).value=''; $('#mOptC',body).value=''; $('#mOptD',body).value=''; $('#mExplain',body).value='';
+    refreshQList(); toast('Question added');
+  });
+  $('#publishManual',body).addEventListener('click', async ()=>{
+    const title = $('#mTitle',body).value.trim();
+    if(!title){ toast('Enter a test title'); return; }
+    if(!questions.length){ toast('Add at least one question'); return; }
+    const meta = { title, correctMark: parseFloat($('#mCorrect',body).value)||0, wrongMark: parseFloat($('#mWrong',body).value)||0, duration: parseInt($('#mDuration',body).value)||0 };
+    const html = buildTestHTML(meta, questions);
+    await db.collection(COL.tests).add({
+      title, subject: $('#mSubject',body).value.trim(), batch: $('#mBatch',body).value.trim(),
+      type: $('#mType',body).value, access: $('#mAccess',body).value,
+      duration: meta.duration, questionCount: questions.length, htmlContent: html, source: 'manual',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast('✅ Test published to Firebase!');
+    questions = []; refreshQList(); $('#mTitle',body).value='';
+  });
+}
+
+function drawPasteForm(body){
+  body.appendChild(el(`
+    <div class="card">
+      <div class="card-title">📋 Paste an HTML test</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+        Ask Claude (in a separate chat) to write a complete self-contained HTML test file — or use one you built yourself.
+        It must call <code style="background:var(--surface-2);padding:1px 5px;border-radius:4px">window.parent.postMessage({type:'submit_test',score,total},'*')</code> on submit so the score saves here.
+      </div>
+      <div class="field"><label>Title</label><input id="pTitle" placeholder="Full Test - 01"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="pSubject" placeholder="Physics"></div>
+        <div class="field"><label>Batch</label><input id="pBatch" placeholder="Class 12 Physics 2026"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice</option></select></div>
+        <div class="field"><label>Access</label><select id="pAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
+      </div>
+      <div class="field"><label>Paste full HTML code</label><textarea id="pHtml" style="min-height:130px;font-family:monospace;font-size:11px"></textarea></div>
+      <button class="btn btn-primary" id="publishPaste">🚀 Publish to Firebase</button>
+    </div>`));
+  $('#publishPaste',body).addEventListener('click', async ()=>{
+    const title = $('#pTitle',body).value.trim();
+    const html = $('#pHtml',body).value.trim();
+    if(!title || !html){ toast('Fill title and paste HTML'); return; }
+    await db.collection(COL.tests).add({
+      title, subject: $('#pSubject',body).value.trim(), batch: $('#pBatch',body).value.trim(),
+      type: $('#pType',body).value, access: $('#pAccess',body).value, htmlContent: html, source: 'pasted',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast('✅ Published to Firebase!');
+    $('#pTitle',body).value=''; $('#pHtml',body).value='';
+  });
+}
+
+function renderAdminNotes(container){
+  container.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title">➕ Add note / assignment (Google Drive)</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+        Upload the PDF to Google Drive → right-click → <b style="color:var(--text)">Share</b> → set to
+        <b style="color:var(--text)">"Anyone with the link → Viewer"</b> → copy the link and paste it below.
+        For a truly view-only file, also open the share dialog's ⚙️ settings and turn <b style="color:var(--text)">off</b>
+        "Viewers can download, print and copy" — that disables downloading at the Drive level, not just in this app.
+      </div>
+      <div class="field"><label>Title</label><input id="nTitle" placeholder="Chapter 5 — Electric Current Notes"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="nSubject" placeholder="Physics"></div>
+        <div class="field"><label>Batch</label><input id="nBatch" placeholder="Class 12 Physics 2026"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Type</label><select id="nType"><option value="study">Study material</option><option value="assignment">Assignment</option></select></div>
+        <div class="field"><label>Access</label><select id="nAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
+      </div>
+      <div class="field"><label>Allow download?</label><select id="nDownload"><option value="yes">Yes — downloadable</option><option value="no">No — view only</option></select></div>
+      <div class="field"><label>Google Drive share link</label><input id="nDriveLink" placeholder="https://drive.google.com/file/d/xxxxxxxx/view"></div>
+      <button class="btn btn-primary" id="uploadNote">💾 Save to Firebase</button>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">Saved files</div>
+    <div id="notesAdminList"><div class="spinner"></div></div>
+  </div>`));
+  $('#uploadNote', container).addEventListener('click', async ()=>{
+    const title = $('#nTitle',container).value.trim();
+    const link = $('#nDriveLink',container).value.trim();
+    if(!title || !link){ toast('Fill title and paste a Drive link'); return; }
+    const driveId = driveIdFromUrl(link);
+    if(!driveId){ toast('Could not read a file ID from that link'); return; }
+    const btn = $('#uploadNote',container); btn.disabled = true; btn.textContent = 'Saving…';
+    try{
+      await db.collection(COL.notes).add({
+        title, subject: $('#nSubject',container).value.trim(), batch: $('#nBatch',container).value.trim(),
+        fileType: $('#nType',container).value, paidOnly: $('#nAccess',container).value === 'paid',
+        downloadable: $('#nDownload',container).value === 'yes',
+        driveId, driveLink: link,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      toast('✅ Saved to Firebase!');
+      $('#nTitle',container).value=''; $('#nDriveLink',container).value='';
+    }catch(e){
+      console.error(e);
+      toast('Could not save — check your connection.');
+    }
+    btn.disabled = false; btn.textContent = '💾 Save to Firebase';
+  });
+  const listBox = $('#notesAdminList', container);
+  const unsub = db.collection(COL.notes).onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No files uploaded yet.</div>'; return; }
+    items.forEach(n=>{
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">${n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div><div class="item-info">
+          <div class="item-title">${esc(n.title)}</div>
+          <div class="item-meta">${esc(n.subject||'')}</div>
+          <div class="item-badges">
+            <span class="badge ${n.downloadable?'badge-free':'badge-paid'}">${n.downloadable?'Downloadable':'View-only'}</span>
+            ${n.paidOnly?'<span class="badge badge-paid">Paid</span>':''}
+          </div>
+        </div></div>
+        <div class="item-actions"><button class="btn-sm btn-danger">🗑 Delete</button></div>
+      </div>`);
+      $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.notes).doc(n.id).delete(); toast('Deleted'); });
+      listBox.appendChild(card);
+    });
+  });
+  trackUnsub(unsub);
+}
+
+/* ================================================================
+   12) PWA — service worker registration + install button
+   ================================================================ */
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('service-worker.js').catch(err=>console.error('SW register failed:', err));
+  });
+}
+
+(function setupInstallButton(){
+  const btn = document.getElementById('pwaInstallBtn');
+  if(!btn) return;
+
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  if(isStandalone) return; // already installed / already running as the app — nothing to offer
+
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  let deferredPrompt = null;
+
+  window.addEventListener('beforeinstallprompt', (e)=>{
+    e.preventDefault();
+    deferredPrompt = e;
+    btn.style.display = 'block';
+  });
+
+  window.addEventListener('appinstalled', ()=>{
+    btn.style.display = 'none';
+    deferredPrompt = null;
+  });
+
+  if(isIOS){
+    // iOS Safari has no beforeinstallprompt API — show the button and
+    // explain the manual Share-sheet steps instead.
+    btn.style.display = 'block';
+  }
+
+  btn.addEventListener('click', async ()=>{
+    if(deferredPrompt){
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      btn.style.display = 'none';
+    } else if(isIOS){
+      toast('Tap the Share icon, then "Add to Home Screen"');
+    } else {
+      toast('Use your browser menu → "Install app" or "Add to Home screen"');
+    }
+  });
+})();
+</script>
+</body>
+</html>
