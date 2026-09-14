@@ -258,6 +258,26 @@ mjx-container{color:var(--text) !important}
 .upgrade-pending{background:var(--warning-bg);border:1px solid var(--warning-brd);color:var(--warning);
   border-radius:var(--radius);padding:10px 12px;font-size:12.5px;text-align:center;margin-bottom:12px}
 
+/* -------- batches & enrollments -------- */
+.batch-card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:14px;margin-bottom:9px;cursor:pointer}
+.batch-card:active{border-color:var(--accent)}
+.batch-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.batch-name{font-size:14.5px;font-weight:700}
+.batch-desc{font-size:11.5px;color:var(--text-dim);margin-top:2px}
+.batch-meta-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.expiry-toggle{display:flex;gap:6px;margin-bottom:10px}
+.expiry-toggle button{flex:1;padding:8px;border:1px solid var(--border);background:var(--surface-2);
+  border-radius:var(--radius);font-size:12px;font-weight:600;color:var(--text-dim)}
+.expiry-toggle button.active{background:rgba(155,140,232,.18);color:var(--accent);border-color:var(--accent)}
+.enroll-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-soft)}
+.enroll-row:last-child{border:none}
+.enroll-info{flex:1;min-width:0}
+.enroll-name{font-size:13px;font-weight:600}
+.enroll-meta{font-size:11px;color:var(--text-dim);margin-top:2px}
+.badge-suspended{background:var(--warning-bg);color:var(--warning)}
+.badge-expired{background:var(--danger-bg);color:var(--danger)}
+
 @media(min-width:481px){
   .content-area,.bottom-nav{max-width:480px}
 }
@@ -338,7 +358,9 @@ const COL = {
   testResults: 'testResults',
   notes: 'notes',
   payments: 'payments',
-  upgradeRequests: 'upgradeRequests'
+  upgradeRequests: 'upgradeRequests',
+  batches: 'batches',
+  enrollments: 'enrollments'
 };
 
 const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
@@ -891,9 +913,19 @@ function renderDashboardTab(container){
         <div style="font-size:17px;font-weight:700">Hi, ${esc(first)} 👋</div>
         ${p.membership==='paid' ? '<span class="badge badge-paid">⭐ PAID</span>' : '<span class="badge badge-free">FREE</span>'}
       </div>
-      <div style="font-size:12px;color:var(--text-muted)">${esc(p.batch||'No batch assigned yet')}${p.class?(' · Class '+esc(p.class)):''}</div>
+      <div id="dashBatchLine" style="font-size:12px;color:var(--text-muted)">Loading your batch…</div>
     </div>
   `));
+  const batchLine = $('#dashBatchLine', container);
+  const unsub = db.collection(COL.enrollments).where('studentId','==',CURRENT_USER.uid).onSnapshot(snap=>{
+    const active = []; snap.forEach(d=>{ const e=d.data(); if(e.status==='active') active.push(e); });
+    if(!active.length){
+      batchLine.textContent = 'No batch assigned yet' + (p.class?(' · Class '+p.class):'');
+    } else {
+      batchLine.textContent = active.map(e=>e.batchName).join(', ') + (p.class?(' · Class '+p.class):'');
+    }
+  }, err=>{ console.error(err); batchLine.textContent = p.batch || 'No batch assigned yet'; });
+  trackUnsub(unsub);
   const links = el(`
     <div class="card">
       <div class="card-title">📌 Quick links</div>
@@ -1488,6 +1520,7 @@ function renderAdminShell(){
     back.addEventListener('click', ()=>{ STATE.adminTab='home'; renderScreen(); });
     content.appendChild(back);
     if(STATE.adminTab==='students') renderAdminStudents(content);
+    else if(STATE.adminTab==='batches') renderAdminBatches(content);
     else if(STATE.adminTab==='classes') renderAdminClasses(content);
     else if(STATE.adminTab==='tests') renderAdminTests(content);
     else if(STATE.adminTab==='notes') renderAdminNotes(content);
@@ -1500,6 +1533,7 @@ function openAdminDrawer(){
   openDrawer(BRAND.name + ' · Admin', [
     { key:'home', icon:'🏠', label:'Dashboard', onSelect:()=>{ STATE.adminTab='home'; renderScreen(); } },
     { key:'students', icon:'👨‍🎓', label:'Students', onSelect:()=>{ STATE.adminTab='students'; renderScreen(); } },
+    { key:'batches', icon:'📚', label:'Batches', onSelect:()=>{ STATE.adminTab='batches'; renderScreen(); } },
     { key:'classes', icon:'🎬', label:'Classes', onSelect:()=>{ STATE.adminTab='classes'; renderScreen(); } },
     { key:'tests', icon:'📝', label:'Tests', onSelect:()=>{ STATE.adminTab='tests'; renderScreen(); } },
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.adminTab='notes'; renderScreen(); } },
@@ -1519,6 +1553,7 @@ function renderAdminHome(container){
   const grid = el(`
     <div class="home-grid">
       <button class="home-tile" data-t="students"><span class="ht-icon">👨‍🎓</span><span class="ht-label">Students</span></button>
+      <button class="home-tile" data-t="batches"><span class="ht-icon">📚</span><span class="ht-label">Batches</span></button>
       <button class="home-tile" data-t="classes"><span class="ht-icon">🎬</span><span class="ht-label">Classes</span></button>
       <button class="home-tile" data-t="tests"><span class="ht-icon">📝</span><span class="ht-label">Tests</span></button>
       <button class="home-tile" data-t="notes"><span class="ht-icon">📄</span><span class="ht-label">Notes</span></button>
@@ -1583,6 +1618,246 @@ function renderAdminUpgradeRequests(container){
     });
   });
   trackUnsub(unsub);
+}
+
+
+function renderAdminBatches(container){
+  container.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title">➕ Create batch</div>
+      <div class="field"><label>Batch name</label><input id="bName" placeholder="e.g. Class 12 Physics 2026"></div>
+      <div class="field"><label>Description (optional)</label><textarea id="bDesc" placeholder="What this batch covers..."></textarea></div>
+      <div class="field"><label>Default expiry for new enrollments</label></div>
+      <div class="expiry-toggle" id="bExpiryToggle">
+        <button type="button" class="active" data-v="lifetime">♾ Lifetime</button>
+        <button type="button" data-v="fixed">📅 Fixed date</button>
+      </div>
+      <div class="field" id="bExpiryDateField" style="display:none"><label>Default expiry date</label><input type="date" id="bExpiryDate"></div>
+      <button class="btn btn-primary" id="createBatchBtn">💾 Create batch</button>
+    </div>
+    <div class="card">
+      <div class="card-title">🔄 One-time migration</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        If students already have an old free-text batch name on their profile, run this once to create a
+        matching batch for each distinct name and enroll those students into it (lifetime expiry, so nobody
+        currently active loses access). Safe to run more than once — it skips names that already have a
+        matching batch and students already enrolled.
+      </div>
+      <button class="btn btn-ghost" id="runMigrationBtn">Migrate existing batch names</button>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">All batches</div>
+    <div id="batchList"><div class="spinner"></div></div>
+  </div>`));
+
+  let expiryMode = 'lifetime';
+  const toggle = $('#bExpiryToggle', container);
+  toggle.addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    expiryMode = b.dataset.v;
+    $all('button', toggle).forEach(x=> x.classList.toggle('active', x===b));
+    $('#bExpiryDateField', container).style.display = expiryMode==='fixed' ? 'block' : 'none';
+  });
+
+  $('#createBatchBtn', container).addEventListener('click', async ()=>{
+    const name = $('#bName', container).value.trim();
+    if(!name){ toast('Enter a batch name'); return; }
+    const expDateVal = $('#bExpiryDate',container).value;
+    const defaultExpiresAt = (expiryMode==='fixed' && expDateVal)
+      ? firebase.firestore.Timestamp.fromDate(new Date(expDateVal))
+      : null;
+    await db.collection(COL.batches).add({
+      name, description: $('#bDesc',container).value.trim(), status:'active',
+      defaultExpiryType: expiryMode, defaultExpiresAt,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    toast('Batch created');
+    $('#bName',container).value=''; $('#bDesc',container).value='';
+  });
+
+  $('#runMigrationBtn', container).addEventListener('click', ()=> runBatchMigration());
+
+  const listBox = $('#batchList', container);
+  const unsub = db.collection(COL.batches).onSnapshot(async snap=>{
+    const batches = []; snap.forEach(d=> batches.push({id:d.id, ...d.data()}));
+    let counts = {};
+    try{
+      const enrollSnap = await db.collection(COL.enrollments).get();
+      enrollSnap.forEach(d=>{ const e=d.data(); if(e.status==='active') counts[e.batchId]=(counts[e.batchId]||0)+1; });
+    }catch(e){ console.error(e); }
+    listBox.innerHTML = '';
+    if(!batches.length){ listBox.appendChild(el(`<div class="empty-state"><div class="icon">📚</div>No batches yet — create one above.</div>`)); return; }
+    batches.forEach(b=>{
+      const card = el(`<div class="batch-card">
+        <div class="batch-card-top">
+          <div><div class="batch-name">${esc(b.name)}</div>${b.description?`<div class="batch-desc">${esc(b.description)}</div>`:''}</div>
+          <span class="badge ${b.status==='active'?'badge-free':'badge-muted'}">${b.status==='active'?'Active':'Archived'}</span>
+        </div>
+        <div class="batch-meta-row">
+          <span class="badge badge-accent">👨‍🎓 ${counts[b.id]||0} enrolled</span>
+          <span class="badge badge-muted">${b.defaultExpiryType==='lifetime'?'♾ Lifetime default':'📅 Fixed default'}</span>
+        </div>
+      </div>`);
+      card.addEventListener('click', ()=> openBatchDetail(b));
+      listBox.appendChild(card);
+    });
+  });
+  trackUnsub(unsub);
+}
+
+function openBatchDetail(batch){
+  const overlay = el(`<div class="overlay open"><div class="sheet">
+    <div class="sheet-handle"></div><button class="sheet-close" id="closeBatch">✕</button><div style="clear:both"></div>
+    <div class="card">
+      <div class="card-title">📚 ${esc(batch.name)}</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${esc(batch.description||'No description')}</div>
+      <div class="row2">
+        <button class="btn ${batch.status==='active'?'btn-danger':'btn-success'}" id="toggleBatchStatus">${batch.status==='active'?'📦 Archive batch':'✅ Reactivate batch'}</button>
+        <button class="btn btn-ghost" id="deleteBatchBtn">🗑 Delete batch</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">➕ Enroll a student</div>
+      <div class="search-input-wrap"><span class="si">🔍</span><input type="text" id="enrollSearch" placeholder="Search student by name or phone..."></div>
+      <div id="enrollSearchResults"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">👨‍🎓 Enrolled students</div>
+      <div id="enrollList"><div class="spinner"></div></div>
+    </div>
+  </div></div>`);
+  document.body.appendChild(overlay);
+  $('#closeBatch', overlay).addEventListener('click', ()=> overlay.remove());
+
+  $('#toggleBatchStatus', overlay).addEventListener('click', async ()=>{
+    await db.collection(COL.batches).doc(batch.id).update({ status: batch.status==='active'?'archived':'active' });
+    toast('Updated'); overlay.remove();
+  });
+  $('#deleteBatchBtn', overlay).addEventListener('click', async ()=>{
+    if(!confirm('Delete this batch? Enrolled students lose this enrollment only — their account, results and payments are untouched.')) return;
+    try{
+      const enrollSnap = await db.collection(COL.enrollments).where('batchId','==',batch.id).get();
+      const dels = []; enrollSnap.forEach(d=> dels.push(db.collection(COL.enrollments).doc(d.id).delete()));
+      await Promise.all(dels);
+      await db.collection(COL.batches).doc(batch.id).delete();
+      toast('Batch deleted'); overlay.remove();
+    }catch(e){ console.error(e); toast('Could not delete — check your connection.'); }
+  });
+
+  let allStudents = [];
+  db.collection(COL.students).get().then(snap=>{ snap.forEach(d=> allStudents.push({id:d.id, ...d.data()})); }).catch(e=>console.error(e));
+  $('#enrollSearch', overlay).addEventListener('input', ()=>{
+    const q = $('#enrollSearch',overlay).value.trim().toLowerCase();
+    const resultsBox = $('#enrollSearchResults', overlay);
+    if(!q){ resultsBox.innerHTML=''; return; }
+    const matches = allStudents.filter(s=> (s.fullName||'').toLowerCase().includes(q) || (s.phone||'').includes(q)).slice(0,5);
+    resultsBox.innerHTML='';
+    matches.forEach(s=>{
+      const row = el(`<div class="enroll-row">
+        <div class="enroll-info"><div class="enroll-name">${esc(s.fullName)}</div><div class="enroll-meta">${esc(s.phone||'')}</div></div>
+        <button class="btn-sm btn-success">+ Enroll</button>
+      </div>`);
+      $('button', row).addEventListener('click', async ()=>{
+        try{
+          const existing = await db.collection(COL.enrollments).where('studentId','==',s.id).get();
+          let already = false;
+          existing.forEach(d=>{ if(d.data().batchId===batch.id) already = true; });
+          if(already){ toast('Already enrolled'); return; }
+          await db.collection(COL.enrollments).add({
+            studentId: s.id, batchId: batch.id, batchName: batch.name,
+            status:'active', expiryType: batch.defaultExpiryType||'lifetime', expiresAt: batch.defaultExpiresAt||null,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          toast('Enrolled ' + s.fullName);
+          $('#enrollSearch',overlay).value=''; resultsBox.innerHTML='';
+        }catch(e){ console.error(e); toast('Could not enroll — check your connection.'); }
+      });
+      resultsBox.appendChild(row);
+    });
+  });
+
+  const enrollListBox = $('#enrollList', overlay);
+  const unsub = db.collection(COL.enrollments).where('batchId','==',batch.id).onSnapshot(async snap=>{
+    const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
+    enrollListBox.innerHTML = '';
+    if(!items.length){ enrollListBox.appendChild(el(`<div class="empty-state">No students enrolled yet.</div>`)); return; }
+    for(const e of items){
+      let sName = e.studentName || 'Student';
+      try{ const sDoc = await db.collection(COL.students).doc(e.studentId).get(); if(sDoc.exists) sName = sDoc.data().fullName; }catch(err){}
+      const expTxt = e.expiryType==='lifetime' ? '♾ Lifetime' : ('Expires ' + fmtDate(e.expiresAt));
+      const statusBadge = e.status==='active' ? '<span class="badge badge-free">Active</span>'
+        : e.status==='suspended' ? '<span class="badge badge-suspended">Suspended</span>'
+        : '<span class="badge badge-expired">Expired</span>';
+      const row = el(`<div class="enroll-row">
+        <div class="enroll-info"><div class="enroll-name">${esc(sName)}</div><div class="enroll-meta">${esc(expTxt)}</div></div>
+        <div class="item-badges">${statusBadge}</div>
+      </div>`);
+      const actions = el(`<div class="item-actions">
+        <button class="btn-sm btn-ghost" data-act="toggle">${e.status==='active'?'⏸ Suspend':'▶ Reactivate'}</button>
+        <button class="btn-sm btn-danger" data-act="remove">🗑 Remove</button>
+      </div>`);
+      $all('button', actions).forEach(b=> b.addEventListener('click', async ()=>{
+        try{
+          if(b.dataset.act==='toggle'){
+            await db.collection(COL.enrollments).doc(e.id).update({ status: e.status==='active'?'suspended':'active', updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            toast('Updated');
+          } else if(b.dataset.act==='remove'){
+            await db.collection(COL.enrollments).doc(e.id).delete();
+            toast('Removed from batch');
+          }
+        }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
+      }));
+      row.appendChild(actions);
+      enrollListBox.appendChild(row);
+    }
+  });
+  trackUnsub(unsub);
+}
+
+/* One-time, safely re-runnable migration: for every distinct free-text
+   `batch` value already on student profiles, create a matching batch
+   document (if one doesn't already exist) and enroll that student into
+   it with lifetime expiry, so nobody currently active loses access. */
+async function runBatchMigration(){
+  toast('Running migration…');
+  try{
+    const studentsSnap = await db.collection(COL.students).get();
+    const students = []; studentsSnap.forEach(d=> students.push({id:d.id, ...d.data()}));
+    const batchesSnap = await db.collection(COL.batches).get();
+    const existingByName = {};
+    batchesSnap.forEach(d=>{ existingByName[d.data().name] = d.id; });
+
+    let created = 0, enrolled = 0;
+    for(const s of students){
+      const name = (s.batch||'').trim();
+      if(!name) continue;
+      let batchId = existingByName[name];
+      if(!batchId){
+        const ref = await db.collection(COL.batches).add({
+          name, description:'', status:'active', defaultExpiryType:'lifetime', defaultExpiresAt:null,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        batchId = ref.id;
+        existingByName[name] = batchId;
+        created++;
+      }
+      const already = await db.collection(COL.enrollments).where('studentId','==',s.id).get();
+      let hasIt = false;
+      already.forEach(d=>{ if(d.data().batchId===batchId) hasIt = true; });
+      if(hasIt) continue;
+      await db.collection(COL.enrollments).add({
+        studentId: s.id, batchId, batchName: name,
+        status:'active', expiryType:'lifetime', expiresAt:null,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      enrolled++;
+    }
+    toast(`Migration done — ${created} batch(es) created, ${enrolled} student(s) enrolled.`);
+  }catch(e){
+    console.error(e);
+    toast('Migration failed — check console.');
+  }
 }
 
 
