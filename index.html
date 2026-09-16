@@ -373,7 +373,6 @@ let CURRENT_ROLE = null;   // 'student' | 'admin'
 // ---- active-session (one-device-at-a-time) state, see AUTH ACTIONS below ----
 let LOGIN_IN_PROGRESS = false;   // true while doLogin()/doAdminLogin() is validating a fresh sign-in
 let CURRENT_SESSION_ID = null;   // this tab's claim on students/{uid}.activeSessionId, once logged in as a student
-let SESSION_HEARTBEAT_TIMER = null; // setInterval handle that refreshes lastActivityAt while the student app is open
 
 function $(sel, root){ return (root||document).querySelector(sel); }
 function $all(sel, root){ return Array.from((root||document).querySelectorAll(sel)); }
@@ -508,6 +507,11 @@ function buildLogo(size){
 const STATE = {
   screen: 'loading',      // loading | auth | adminLogin | student | admin
   authMode: 'login',      // login | register
+  authError: null,        // {screen:'auth'|'adminLogin', title, body} — sticky login-failure message;
+                           // persists across re-renders (e.g. the auth-state listener re-rendering
+                           // after a failed login signs out) and is only cleared when a new attempt begins
+  authNotice: null,       // {screen:'auth', title, body} — sticky SUCCESS-styled message (e.g. "check your email"
+                           // after a password-reset request), shown once then cleared
   studentTab: 'dashboard', // dashboard | classes | tests | notes | profile
   classesSubTab: 'recorded',
   adminTab: 'home',
@@ -582,28 +586,74 @@ function renderAuthScreen(){
 
   const errBox = el(`<div class="auth-error"></div>`);
   card.appendChild(errBox);
+  if(STATE.authError && STATE.authError.screen === 'auth' && STATE.authMode === 'login'){
+    errBox.innerHTML = `<strong>${esc(STATE.authError.title)}</strong><br>${esc(STATE.authError.body)}`;
+    errBox.classList.add('show');
+  }
+  if(STATE.authNotice && STATE.authNotice.screen === 'auth' && STATE.authMode === 'login'){
+    card.appendChild(el(`<div style="background:var(--success-bg);border:1px solid var(--success-brd);color:var(--success);font-size:12.5px;padding:10px 12px;border-radius:8px;margin-bottom:12px">✅ <strong>${esc(STATE.authNotice.title)}</strong><br>${esc(STATE.authNotice.body)}</div>`));
+    STATE.authNotice = null;
+  }
 
   if(STATE.authMode === 'login'){
     const form = el(`
       <form id="loginForm">
-        <div class="field"><label>Email</label><input type="email" id="liEmail" required placeholder="you@example.com"></div>
-        <div class="field"><label>Password</label><input type="password" id="liPass" required placeholder="••••••••"></div>
+        <div class="field"><label>Email</label><input type="email" id="liEmail" autocomplete="username" required placeholder="you@example.com"></div>
+        <div class="field"><label>Password</label><input type="password" id="liPass" autocomplete="current-password" required placeholder="••••••••"></div>
         <button class="btn btn-primary" type="submit" id="liBtn">Log in</button>
       </form>
     `);
     form.addEventListener('submit', async e=>{
       e.preventDefault();
+      STATE.authError = null;
+      STATE.authNotice = null;
       errBox.classList.remove('show');
       const btn = $('#liBtn', form); btn.disabled = true; btn.textContent = 'Logging in…';
       try{
         await doLogin($('#liEmail',form).value.trim(), $('#liPass',form).value);
       }catch(err){
-        errBox.textContent = friendlyAuthError(err);
-        errBox.classList.add('show');
+        const d = authErrorDisplay(err);
+        STATE.authError = { screen:'auth', title:d.title, body:d.body };
+        // Re-render explicitly rather than trusting the direct errBox update
+        // below: a rejected login that also had to sign out (deactivated /
+        // device-locked / not-found) triggers the auth-state listener's own
+        // re-render too, and whichever of the two runs last would otherwise
+        // win. STATE.authError is sticky, so however many renders happen,
+        // the message stays visible until the next attempt.
+        renderScreen();
+        return;
       }
       btn.disabled = false; btn.textContent = 'Log in';
     });
     card.appendChild(form);
+
+    const forgotLink = el(`<div class="auth-link" id="forgotPwLink" style="cursor:pointer">Forgot password?</div>`);
+    let resetInFlight = false;
+    forgotLink.addEventListener('click', async ()=>{
+      if(resetInFlight) return;
+      STATE.authError = null;
+      STATE.authNotice = null;
+      const email = $('#liEmail', form).value.trim();
+      if(!email){
+        STATE.authError = { screen:'auth', title:'Enter your email first', body:'Type your email address above, then tap \u201cForgot password?\u201d again.' };
+        renderScreen();
+        return;
+      }
+      resetInFlight = true;
+      forgotLink.textContent = 'Sending…';
+      // This only ever calls Firebase Auth's own password-reset email — it
+      // never touches Firestore, so it can't affect the active device/session
+      // lock in any way.
+      try{
+        await auth.sendPasswordResetEmail(email);
+        STATE.authNotice = { screen:'auth', title:'Check your email', body:`We\u2019ve sent a password reset link to ${email}. Check your inbox (and spam folder).` };
+      }catch(err){
+        const d = authErrorDisplay(err);
+        STATE.authError = { screen:'auth', title:d.title, body:d.body };
+      }
+      renderScreen();
+    });
+    card.appendChild(forgotLink);
     card.appendChild(el(`<div class="auth-link">New here? Tap Register above to create a free account.</div>`));
   } else {
     const form = el(`
@@ -684,22 +734,29 @@ function renderAdminLoginScreen(){
   `));
   const errBox = el(`<div class="auth-error" style="margin-top:20px"></div>`);
   card.appendChild(errBox);
+  if(STATE.authError && STATE.authError.screen === 'adminLogin'){
+    errBox.innerHTML = `<strong>${esc(STATE.authError.title)}</strong><br>${esc(STATE.authError.body)}`;
+    errBox.classList.add('show');
+  }
   const form = el(`
     <form id="adminLoginForm">
-      <div class="field"><label>Admin email</label><input type="email" id="aEmail" required></div>
-      <div class="field"><label>Password</label><input type="password" id="aPass" required></div>
+      <div class="field"><label>Admin email</label><input type="email" id="aEmail" autocomplete="username" required></div>
+      <div class="field"><label>Password</label><input type="password" id="aPass" autocomplete="current-password" required></div>
       <button class="btn btn-primary" type="submit" id="aBtn">Log in as admin</button>
     </form>
   `);
   form.addEventListener('submit', async e=>{
     e.preventDefault();
+    STATE.authError = null;
     errBox.classList.remove('show');
     const btn = $('#aBtn',form); btn.disabled = true; btn.textContent = 'Checking…';
     try{
       await doAdminLogin($('#aEmail',form).value.trim(), $('#aPass',form).value);
     }catch(err){
-      errBox.textContent = friendlyAuthError(err);
-      errBox.classList.add('show');
+      const d = authErrorDisplay(err);
+      STATE.authError = { screen:'adminLogin', title:d.title, body:d.body };
+      renderScreen();
+      return;
     }
     btn.disabled = false; btn.textContent = 'Log in as admin';
   });
@@ -726,26 +783,46 @@ function friendlyAuthError(err){
   return map[code] || (err && err.message) || 'Something went wrong. Please try again.';
 }
 
+/* Title+body version used by the login forms (student + admin), so a
+   failure reads as a clear two-line message ("Login failed" / "Incorrect
+   email or password.") inside the app's own error box — never a bare
+   browser alert(), and never something a Chrome password-manager popup
+   can be mistaken for. Our own hand-thrown errors (deactivated, device
+   locked, account not found, etc.) already carry a ready-to-show
+   err.title; anything else is matched by Firebase's auth/* error code. */
+function authErrorDisplay(err){
+  if(err && err.title){
+    return { title: err.title, body: (err.message || '') };
+  }
+  const code = err && err.code || '';
+  const map = {
+    'auth/wrong-password':         { title:'Login failed', body:'Incorrect email or password.' },
+    'auth/invalid-credential':     { title:'Login failed', body:'Incorrect email or password.' },
+    'auth/user-not-found':         { title:'Account not found', body:'No account found with this email.' },
+    'auth/invalid-email':          { title:'Login failed', body:'Enter a valid email address.' },
+    'auth/user-disabled':          { title:'Account deactivated', body:'Your account has been deactivated. Please contact your teacher.' },
+    'auth/too-many-requests':      { title:'Too many attempts', body:'Please wait a bit and try again.' },
+    'auth/network-request-failed': { title:'Login temporarily unavailable', body:'Please check your internet connection and try again.' },
+    'permission-denied':           { title:'Permission error', body:'Your account doesn\u2019t have permission for this yet \u2014 if you just set this up, make sure firestore.rules has been published in the Firebase console.' }
+  };
+  if(map[code]) return map[code];
+  return { title:'Login failed', body:(err && err.message) || 'Something went wrong. Please try again.' };
+}
+
 /* ================================================================
    6) AUTH ACTIONS
    ----------------------------------------------------------------
    ACTIVE-SESSION SYSTEM (one student device at a time)
-   Replaces the old permanent "deviceId lock" with a temporary claim:
+   Replaces the old permanent "deviceId lock" with an explicit claim:
      students/{uid}.activeSessionId   — random id for the current login
      students/{uid}.activeDeviceId    — which browser/device holds it
      students/{uid}.sessionStartedAt  — server timestamp, informational
-     students/{uid}.lastActivityAt    — server timestamp, refreshed by a
-                                         heartbeat while the app is open
-   A session is "stale" (available to claim) once lastActivityAt is older
-   than SESSION_STALE_MS — this is what unlocks a forgotten-open browser
-   without needing an admin reset. Logging out clears the four fields
-   immediately instead of waiting for staleness. The old "deviceId" field
-   is left in place for backward compatibility but is no longer read as a
-   lock anywhere.
+   The session stays active until the student explicitly logs out, or an
+   admin uses Reset Device — there is NO stale-session timeout and NO
+   heartbeat. A forgotten-open browser is only ever freed up by Reset
+   Device, by design. The old "deviceId" field is left in place for
+   backward compatibility but is no longer read as a lock anywhere.
    ================================================================ */
-const SESSION_STALE_MS = 20 * 60 * 1000;    // session is claimable again after 20 min of no activity
-const SESSION_HEARTBEAT_MS = 5 * 60 * 1000; // refresh lastActivityAt every 5 min while the app is open
-
 function newSessionId(){
   return 'sess_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
 }
@@ -770,44 +847,40 @@ function setLocalSessionId(id){
 /* Attempts to claim (or silently confirm) this device's exclusive active
    session for a student, inside a Firestore transaction so two
    near-simultaneous logins on different devices can't both succeed.
-   - If a DIFFERENT device holds a still-live (non-stale) session, throws
+   - If a DIFFERENT device already holds the session, throws
      { code:'device-locked', message } — the one real, intended block.
+     There is no staleness check — only an explicit logout or an admin
+     Reset Device ever frees this up.
    - If the same device already holds it (another tab, or resuming after
-     the browser was fully closed), or the session is stale/absent
-     (including old documents that don't have these fields yet), claims a
-     session for this device and returns its id.
+     the browser was fully closed), or there's no active session at all
+     (including old documents that don't have these fields yet), claims
+     it for this device and returns its id.
    Returns the session id this device now holds. */
-async function claimStudentSession(uid, myDevice, myKnownSessionId){
+async function claimStudentSession(uid, myDevice){
   const ref = db.collection(COL.students).doc(uid);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if(!snap.exists){
-      throw { code:'', message:'Student record not found.' };
+      throw { code:'', title:'Account not found', message:'Student record not found.' };
     }
     const data = snap.data();
-    const lastActive = (data.lastActivityAt && data.lastActivityAt.toDate) ? data.lastActivityAt.toDate().getTime() : 0;
-    const isStale = !data.activeSessionId || !lastActive || (Date.now() - lastActive) > SESSION_STALE_MS;
     const sameDevice = !!data.activeDeviceId && data.activeDeviceId === myDevice;
-    const sameSession = sameDevice && !!myKnownSessionId && data.activeSessionId === myKnownSessionId;
 
-    if(!isStale && !sameDevice){
-      throw { code:'device-locked', message:'This account is currently logged in on another device. Please log out from that device first, or ask your teacher to reset your device.' };
+    if(data.activeSessionId && !sameDevice){
+      throw { code:'device-locked', title:'Already logged in on another device', message:'This account is currently logged in on another device. Please log out from that device first, or ask your teacher to reset your device.' };
     }
-    if(sameSession && !isStale){
-      // Already our own confirmed session — just refresh activity.
-      tx.update(ref, { lastActivityAt: firebase.firestore.FieldValue.serverTimestamp() });
-      return myKnownSessionId;
+    if(sameDevice && data.activeSessionId){
+      // Already this device's session (a second tab, or resuming after a
+      // reload) — nothing to change.
+      return data.activeSessionId;
     }
-    // No live session, it's gone stale, or it's this same device reclaiming
-    // (a second tab, or resuming after being fully closed) — issue a fresh
-    // session for this device. This also auto-migrates old student
-    // documents that never had these fields.
+    // No active session at all — claim it fresh. This also auto-migrates
+    // old student documents that never had these fields.
     const sid = newSessionId();
     tx.update(ref, {
       activeSessionId: sid,
       activeDeviceId: myDevice,
-      sessionStartedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      lastActivityAt: firebase.firestore.FieldValue.serverTimestamp()
+      sessionStartedAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     return sid;
   });
@@ -827,8 +900,7 @@ async function releaseStudentSession(uid, myKnownSessionId){
       const data = snap.data();
       if(data.activeSessionId && data.activeSessionId === myKnownSessionId){
         tx.update(ref, {
-          activeSessionId: '', activeDeviceId: '',
-          sessionStartedAt: null, lastActivityAt: null
+          activeSessionId: '', activeDeviceId: '', sessionStartedAt: null
         });
       }
       // else: a different device/tab now owns the session — leave it alone.
@@ -836,19 +908,6 @@ async function releaseStudentSession(uid, myKnownSessionId){
   }catch(e){
     console.error('[session] failed to release session on logout (non-blocking):', e);
   }
-}
-
-function startSessionHeartbeat(){
-  stopSessionHeartbeat();
-  SESSION_HEARTBEAT_TIMER = setInterval(()=>{
-    if(!CURRENT_USER || CURRENT_ROLE !== 'student' || !CURRENT_SESSION_ID) return;
-    db.collection(COL.students).doc(CURRENT_USER.uid)
-      .update({ lastActivityAt: firebase.firestore.FieldValue.serverTimestamp() })
-      .catch(e=> console.error('[session] heartbeat update failed (non-blocking):', e));
-  }, SESSION_HEARTBEAT_MS);
-}
-function stopSessionHeartbeat(){
-  if(SESSION_HEARTBEAT_TIMER){ clearInterval(SESSION_HEARTBEAT_TIMER); SESSION_HEARTBEAT_TIMER = null; }
 }
 
 async function doRegister(data){
@@ -892,17 +951,18 @@ async function doLogin(email, password){
     }catch(fetchErr){
       console.error('[login] could not load student record:', fetchErr);
       await auth.signOut();
-      throw { code:'', message:'Could not reach the server. Check your connection and try again.' };
+      throw { code:'', title:'Login temporarily unavailable', message:'Please check your internet connection and try again.' };
     }
     if(!doc.exists){
       console.error('[login] signed in OK but no students/'+uid+' document exists.');
       await auth.signOut();
-      throw { code:'', message:'No student account found for this login. Are you trying the admin login instead?' };
+      throw { code:'', title:'Account not found', message:'No student account was found for this login. Are you trying the admin login instead?' };
     }
     const data = doc.data();
     if(data.active === false){
       await auth.signOut();
-      throw { code:'', message:'Your account has been deactivated. Please contact your teacher.' };
+      const reasonSuffix = data.deactivationReason ? ` Reason: ${data.deactivationReason}` : '';
+      throw { code:'', title:'Account deactivated', message:`Your account has been deactivated.${reasonSuffix} Please contact your teacher.` };
     }
     // Active-session (one-device) check — hardened the same way the old
     // device-lock check was: only a CONFIRMED conflicting session on
@@ -911,13 +971,13 @@ async function doLogin(email, password){
     // student out, so it's logged and the login is allowed through.
     const myDevice = getDeviceId();
     try{
-      const sid = await claimStudentSession(uid, myDevice, null);
+      const sid = await claimStudentSession(uid, myDevice);
       CURRENT_SESSION_ID = sid;
       setLocalSessionId(sid);
     }catch(sessionErr){
       if(sessionErr && sessionErr.code === 'device-locked'){
         await auth.signOut();
-        throw { code:'', message: sessionErr.message };
+        throw { code:'', title:'Already logged in on another device', message: sessionErr.message };
       }
       console.error('[session] claim failed unexpectedly, allowing login anyway:', sessionErr);
       CURRENT_SESSION_ID = null;
@@ -931,7 +991,6 @@ async function doLogin(email, password){
     CURRENT_PROFILE = data;
     STATE.screen = 'student';
     renderScreen();
-    if(CURRENT_SESSION_ID) startSessionHeartbeat();
   } finally {
     LOGIN_IN_PROGRESS = false;
   }
@@ -943,7 +1002,7 @@ async function doAdminLogin(email, password){
   const doc = await db.collection(COL.admins).doc(uid).get();
   if(!doc.exists){
     await auth.signOut();
-    throw { code:'', message:'This account is not authorized as admin.' };
+    throw { code:'', title:'Not authorized', message:'This account is not authorized as admin.' };
   }
   // onAuthStateChanged will pick this up and route to the admin app.
 }
@@ -953,7 +1012,6 @@ async function doLogout(){
   if(user && CURRENT_ROLE === 'student'){
     await releaseStudentSession(user.uid, CURRENT_SESSION_ID || getLocalSessionId());
   }
-  stopSessionHeartbeat();
   CURRENT_SESSION_ID = null;
   setLocalSessionId(null);
   auth.signOut();
@@ -966,7 +1024,6 @@ auth.onAuthStateChanged(async (user) => {
   CURRENT_USER = user;
   if(!user){
     CURRENT_PROFILE = null; CURRENT_ROLE = null;
-    stopSessionHeartbeat();
     CURRENT_SESSION_ID = null;
     STATE.screen = 'auth';
     renderScreen();
@@ -994,19 +1051,16 @@ auth.onAuthStateChanged(async (user) => {
       // A resumed session (page load/reload, or the PWA waking back up,
       // not a fresh password login — doLogin already handled that case
       // above). Confirm this device still legitimately holds the active
-      // session before letting it back into the dashboard, and restart
-      // the activity heartbeat — a plain reload loses the old interval.
+      // session before letting it back into the dashboard.
       const myDevice = getDeviceId();
-      const knownSession = getLocalSessionId();
       try{
-        const sid = await claimStudentSession(user.uid, myDevice, knownSession);
+        const sid = await claimStudentSession(user.uid, myDevice);
         CURRENT_SESSION_ID = sid;
         setLocalSessionId(sid);
         CURRENT_ROLE = 'student';
         CURRENT_PROFILE = data;
         STATE.screen = 'student';
         renderScreen();
-        startSessionHeartbeat();
       }catch(sessionErr){
         if(sessionErr && sessionErr.code === 'device-locked'){
           CURRENT_SESSION_ID = null; setLocalSessionId(null);
@@ -1018,7 +1072,6 @@ auth.onAuthStateChanged(async (user) => {
           CURRENT_PROFILE = data;
           STATE.screen = 'student';
           renderScreen();
-          startSessionHeartbeat();
         }
       }
       return;
@@ -2232,7 +2285,7 @@ function renderAdminStudents(container){
               <div class="item-badges">
                 <span class="badge ${s.membership==='paid'?'badge-paid':'badge-free'}">${s.membership==='paid'?'⭐ Paid':'Free'}</span>
                 <span class="badge ${n>0?'badge-accent':'badge-muted'}">📚 ${n>0?(n+' batch'+(n>1?'es':'')):'No batch'}</span>
-                ${s.active===false?'<span class="badge badge-muted">Deactivated</span>':''}
+                ${s.active===false?`<span class="badge badge-muted" ${s.deactivationReason?`title="${esc(s.deactivationReason)}"`:''}>Deactivated</span>`:''}
               </div>
             </div>
           </div>
@@ -2259,6 +2312,7 @@ function openStudentDetail(s){
         <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${s.active===false?'✅ Activate':'🚫 Deactivate'}</button>
         <button class="btn btn-ghost" id="resetDevice">🔄 Reset device</button>
       </div>
+      ${s.active===false && s.deactivationReason ? `<div style="background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);font-size:12px;padding:8px 10px;border-radius:8px;margin-top:10px"><b>Reason:</b> ${esc(s.deactivationReason)}</div>` : ''}
     </div>
     <div class="card">
       <div class="card-title">⭐ Membership</div>
@@ -2294,8 +2348,24 @@ function openStudentDetail(s){
   let enrollUnsub = null;
   $('#closeDetail', overlay).addEventListener('click', ()=>{ if(enrollUnsub) enrollUnsub(); overlay.remove(); });
   $('#toggleActive', overlay).addEventListener('click', async ()=>{
-    await db.collection(COL.students).doc(s.id).update({ active: s.active===false });
-    toast(s.active===false ? 'Student activated' : 'Student deactivated');
+    if(s.active===false){
+      // Re-activating — just clear the flag and any old reason.
+      await db.collection(COL.students).doc(s.id).update({ active: true, deactivationReason: '' });
+      toast('Student activated');
+    } else {
+      // Deactivating — a reason is mandatory so it can be shown to the
+      // student on their next login attempt and to any admin looking at
+      // this profile later.
+      const reason = prompt('Reason for deactivating this student (required):');
+      if(reason === null) return; // cancelled
+      const trimmed = reason.trim();
+      if(!trimmed){
+        toast('A reason is required to deactivate a student.');
+        return;
+      }
+      await db.collection(COL.students).doc(s.id).update({ active: false, deactivationReason: trimmed });
+      toast('Student deactivated');
+    }
     if(enrollUnsub) enrollUnsub(); overlay.remove();
   });
   $('#resetDevice', overlay).addEventListener('click', async ()=>{
@@ -2303,8 +2373,7 @@ function openStudentDetail(s){
       deviceId: '',
       activeSessionId: '',
       activeDeviceId: '',
-      sessionStartedAt: null,
-      lastActivityAt: null
+      sessionStartedAt: null
     });
     toast('Device reset — student can log in on a new device now.');
   });
