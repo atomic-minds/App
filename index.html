@@ -370,6 +370,11 @@ let CURRENT_USER = null;   // firebase auth user
 let CURRENT_PROFILE = null; // firestore student/admin doc data
 let CURRENT_ROLE = null;   // 'student' | 'admin'
 
+// ---- active-session (one-device-at-a-time) state, see AUTH ACTIONS below ----
+let LOGIN_IN_PROGRESS = false;   // true while doLogin()/doAdminLogin() is validating a fresh sign-in
+let CURRENT_SESSION_ID = null;   // this tab's claim on students/{uid}.activeSessionId, once logged in as a student
+let SESSION_HEARTBEAT_TIMER = null; // setInterval handle that refreshes lastActivityAt while the student app is open
+
 function $(sel, root){ return (root||document).querySelector(sel); }
 function $all(sel, root){ return Array.from((root||document).querySelectorAll(sel)); }
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstElementChild; }
@@ -432,10 +437,12 @@ function renderRich(container, raw){
   }
 }
 
-/* Single-device login: a random ID is generated once per browser/device
-   and stored in localStorage. On login we compare it against the value
-   saved on the student's Firestore doc. If they differ, someone else's
-   device is already bound — login is blocked until admin resets it.
+/* A random ID generated once per browser/device and stored in localStorage,
+   used to identify "this browser" to the active-session system below (see
+   AUTH ACTIONS). It is NOT itself a login lock — it's just this device's
+   fingerprint; students/{uid}.activeDeviceId is the temporary lock, and it
+   is released on logout or after a period of inactivity, not tied
+   permanently to any one device.
    Wrapped defensively: some browser contexts (strict private-browsing
    modes, certain in-app browsers) can block localStorage entirely — if
    that happens we fall back to a session-only id instead of crashing. */
@@ -721,7 +728,129 @@ function friendlyAuthError(err){
 
 /* ================================================================
    6) AUTH ACTIONS
+   ----------------------------------------------------------------
+   ACTIVE-SESSION SYSTEM (one student device at a time)
+   Replaces the old permanent "deviceId lock" with a temporary claim:
+     students/{uid}.activeSessionId   — random id for the current login
+     students/{uid}.activeDeviceId    — which browser/device holds it
+     students/{uid}.sessionStartedAt  — server timestamp, informational
+     students/{uid}.lastActivityAt    — server timestamp, refreshed by a
+                                         heartbeat while the app is open
+   A session is "stale" (available to claim) once lastActivityAt is older
+   than SESSION_STALE_MS — this is what unlocks a forgotten-open browser
+   without needing an admin reset. Logging out clears the four fields
+   immediately instead of waiting for staleness. The old "deviceId" field
+   is left in place for backward compatibility but is no longer read as a
+   lock anywhere.
    ================================================================ */
+const SESSION_STALE_MS = 20 * 60 * 1000;    // session is claimable again after 20 min of no activity
+const SESSION_HEARTBEAT_MS = 5 * 60 * 1000; // refresh lastActivityAt every 5 min while the app is open
+
+function newSessionId(){
+  return 'sess_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+/* This browser tab's record of which session it currently holds, so a
+   page reload can tell "is the lock still mine?" without guessing, and a
+   logout can avoid ever clearing a session it doesn't own. Kept in
+   sessionStorage (per-tab, cleared when the tab/window closes) rather
+   than localStorage, deliberately: it should NOT survive into a brand
+   new tab the way the device id does. */
+function getLocalSessionId(){
+  try{ return sessionStorage.getItem('am_session_id') || null; }
+  catch(e){ return CURRENT_SESSION_ID; }
+}
+function setLocalSessionId(id){
+  try{
+    if(id) sessionStorage.setItem('am_session_id', id);
+    else sessionStorage.removeItem('am_session_id');
+  }catch(e){ console.error('[session] sessionStorage unavailable (non-blocking):', e); }
+}
+
+/* Attempts to claim (or silently confirm) this device's exclusive active
+   session for a student, inside a Firestore transaction so two
+   near-simultaneous logins on different devices can't both succeed.
+   - If a DIFFERENT device holds a still-live (non-stale) session, throws
+     { code:'device-locked', message } — the one real, intended block.
+   - If the same device already holds it (another tab, or resuming after
+     the browser was fully closed), or the session is stale/absent
+     (including old documents that don't have these fields yet), claims a
+     session for this device and returns its id.
+   Returns the session id this device now holds. */
+async function claimStudentSession(uid, myDevice, myKnownSessionId){
+  const ref = db.collection(COL.students).doc(uid);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if(!snap.exists){
+      throw { code:'', message:'Student record not found.' };
+    }
+    const data = snap.data();
+    const lastActive = (data.lastActivityAt && data.lastActivityAt.toDate) ? data.lastActivityAt.toDate().getTime() : 0;
+    const isStale = !data.activeSessionId || !lastActive || (Date.now() - lastActive) > SESSION_STALE_MS;
+    const sameDevice = !!data.activeDeviceId && data.activeDeviceId === myDevice;
+    const sameSession = sameDevice && !!myKnownSessionId && data.activeSessionId === myKnownSessionId;
+
+    if(!isStale && !sameDevice){
+      throw { code:'device-locked', message:'This account is currently logged in on another device. Please log out from that device first, or ask your teacher to reset your device.' };
+    }
+    if(sameSession && !isStale){
+      // Already our own confirmed session — just refresh activity.
+      tx.update(ref, { lastActivityAt: firebase.firestore.FieldValue.serverTimestamp() });
+      return myKnownSessionId;
+    }
+    // No live session, it's gone stale, or it's this same device reclaiming
+    // (a second tab, or resuming after being fully closed) — issue a fresh
+    // session for this device. This also auto-migrates old student
+    // documents that never had these fields.
+    const sid = newSessionId();
+    tx.update(ref, {
+      activeSessionId: sid,
+      activeDeviceId: myDevice,
+      sessionStartedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      lastActivityAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return sid;
+  });
+}
+
+/* Clears the active-session fields ONLY if they still belong to this
+   browser/session — never another device's, and never a different tab's
+   newer claim on the same device. Never throws (logout must always be
+   able to proceed even if this fails). */
+async function releaseStudentSession(uid, myKnownSessionId){
+  if(!myKnownSessionId) return;
+  try{
+    await db.runTransaction(async (tx) => {
+      const ref = db.collection(COL.students).doc(uid);
+      const snap = await tx.get(ref);
+      if(!snap.exists) return;
+      const data = snap.data();
+      if(data.activeSessionId && data.activeSessionId === myKnownSessionId){
+        tx.update(ref, {
+          activeSessionId: '', activeDeviceId: '',
+          sessionStartedAt: null, lastActivityAt: null
+        });
+      }
+      // else: a different device/tab now owns the session — leave it alone.
+    });
+  }catch(e){
+    console.error('[session] failed to release session on logout (non-blocking):', e);
+  }
+}
+
+function startSessionHeartbeat(){
+  stopSessionHeartbeat();
+  SESSION_HEARTBEAT_TIMER = setInterval(()=>{
+    if(!CURRENT_USER || CURRENT_ROLE !== 'student' || !CURRENT_SESSION_ID) return;
+    db.collection(COL.students).doc(CURRENT_USER.uid)
+      .update({ lastActivityAt: firebase.firestore.FieldValue.serverTimestamp() })
+      .catch(e=> console.error('[session] heartbeat update failed (non-blocking):', e));
+  }, SESSION_HEARTBEAT_MS);
+}
+function stopSessionHeartbeat(){
+  if(SESSION_HEARTBEAT_TIMER){ clearInterval(SESSION_HEARTBEAT_TIMER); SESSION_HEARTBEAT_TIMER = null; }
+}
+
 async function doRegister(data){
   const cred = await auth.createUserWithEmailAndPassword(data.email, data.password);
   const uid = cred.user.uid;
@@ -753,41 +882,59 @@ async function doRegister(data){
 }
 
 async function doLogin(email, password){
-  const cred = await auth.signInWithEmailAndPassword(email, password);
-  const uid = cred.user.uid;
-  const doc = await db.collection(COL.students).doc(uid).get();
-  if(!doc.exists){
-    console.error('[login] signed in OK but no students/'+uid+' document exists.');
-    await auth.signOut();
-    throw { code:'', message:'No student account found for this login. Are you trying the admin login instead?' };
-  }
-  const data = doc.data();
-  if(data.active === false){
-    await auth.signOut();
-    throw { code:'', message:'Your account has been deactivated. Please contact your teacher.' };
-  }
-  // Single-device check — hardened so a problem with the check itself
-  // (storage blocked, a transient write failure) never blocks a
-  // legitimate login. Only an actual device mismatch blocks login.
+  LOGIN_IN_PROGRESS = true;
   try{
-    const myDevice = getDeviceId();
-    if(!data.deviceId){
-      try{
-        await db.collection(COL.students).doc(uid).update({ deviceId: myDevice });
-      }catch(writeErr){
-        console.error('[device-lock] could not bind device on first login (non-blocking):', writeErr);
-      }
-    } else if(data.deviceId !== myDevice){
+    const cred = await auth.signInWithEmailAndPassword(email, password);
+    const uid = cred.user.uid;
+    let doc;
+    try{
+      doc = await db.collection(COL.students).doc(uid).get();
+    }catch(fetchErr){
+      console.error('[login] could not load student record:', fetchErr);
       await auth.signOut();
-      throw { code:'', message:'This account is already logged in on another device. Ask your teacher to reset your device to log in here.' };
+      throw { code:'', message:'Could not reach the server. Check your connection and try again.' };
     }
-  }catch(deviceErr){
-    if(deviceErr && deviceErr.message && deviceErr.message.indexOf('already logged in on another device') !== -1){
-      throw deviceErr; // this is the real, intended block — must not be swallowed
+    if(!doc.exists){
+      console.error('[login] signed in OK but no students/'+uid+' document exists.');
+      await auth.signOut();
+      throw { code:'', message:'No student account found for this login. Are you trying the admin login instead?' };
     }
-    console.error('[device-lock] check failed unexpectedly, allowing login anyway:', deviceErr);
+    const data = doc.data();
+    if(data.active === false){
+      await auth.signOut();
+      throw { code:'', message:'Your account has been deactivated. Please contact your teacher.' };
+    }
+    // Active-session (one-device) check — hardened the same way the old
+    // device-lock check was: only a CONFIRMED conflicting session on
+    // another device blocks login. A problem with the check itself
+    // (offline, a failed transaction) must never lock a legitimate
+    // student out, so it's logged and the login is allowed through.
+    const myDevice = getDeviceId();
+    try{
+      const sid = await claimStudentSession(uid, myDevice, null);
+      CURRENT_SESSION_ID = sid;
+      setLocalSessionId(sid);
+    }catch(sessionErr){
+      if(sessionErr && sessionErr.code === 'device-locked'){
+        await auth.signOut();
+        throw { code:'', message: sessionErr.message };
+      }
+      console.error('[session] claim failed unexpectedly, allowing login anyway:', sessionErr);
+      CURRENT_SESSION_ID = null;
+      setLocalSessionId(null);
+    }
+    // Route straight to the dashboard ourselves, rather than waiting on
+    // onAuthStateChanged, so a deactivated or device-locked account can
+    // never flash the dashboard for an instant before being signed back out.
+    CURRENT_USER = cred.user;
+    CURRENT_ROLE = 'student';
+    CURRENT_PROFILE = data;
+    STATE.screen = 'student';
+    renderScreen();
+    if(CURRENT_SESSION_ID) startSessionHeartbeat();
+  } finally {
+    LOGIN_IN_PROGRESS = false;
   }
-  // onAuthStateChanged will pick this up and route to the student app.
 }
 
 async function doAdminLogin(email, password){
@@ -801,7 +948,14 @@ async function doAdminLogin(email, password){
   // onAuthStateChanged will pick this up and route to the admin app.
 }
 
-function doLogout(){
+async function doLogout(){
+  const user = auth.currentUser;
+  if(user && CURRENT_ROLE === 'student'){
+    await releaseStudentSession(user.uid, CURRENT_SESSION_ID || getLocalSessionId());
+  }
+  stopSessionHeartbeat();
+  CURRENT_SESSION_ID = null;
+  setLocalSessionId(null);
   auth.signOut();
 }
 
@@ -812,8 +966,17 @@ auth.onAuthStateChanged(async (user) => {
   CURRENT_USER = user;
   if(!user){
     CURRENT_PROFILE = null; CURRENT_ROLE = null;
+    stopSessionHeartbeat();
+    CURRENT_SESSION_ID = null;
     STATE.screen = 'auth';
     renderScreen();
+    return;
+  }
+  if(LOGIN_IN_PROGRESS){
+    // doLogin() is actively validating this exact sign-in and will route
+    // to the right screen itself once it finishes — skip here so a
+    // not-yet-approved login can never flash the dashboard before being
+    // signed back out (see doLogin above).
     return;
   }
   try{
@@ -827,10 +990,37 @@ auth.onAuthStateChanged(async (user) => {
     }
     const studentDoc = await db.collection(COL.students).doc(user.uid).get();
     if(studentDoc.exists && studentDoc.data().active !== false){
-      CURRENT_ROLE = 'student';
-      CURRENT_PROFILE = studentDoc.data();
-      STATE.screen = 'student';
-      renderScreen();
+      const data = studentDoc.data();
+      // A resumed session (page load/reload, or the PWA waking back up,
+      // not a fresh password login — doLogin already handled that case
+      // above). Confirm this device still legitimately holds the active
+      // session before letting it back into the dashboard, and restart
+      // the activity heartbeat — a plain reload loses the old interval.
+      const myDevice = getDeviceId();
+      const knownSession = getLocalSessionId();
+      try{
+        const sid = await claimStudentSession(user.uid, myDevice, knownSession);
+        CURRENT_SESSION_ID = sid;
+        setLocalSessionId(sid);
+        CURRENT_ROLE = 'student';
+        CURRENT_PROFILE = data;
+        STATE.screen = 'student';
+        renderScreen();
+        startSessionHeartbeat();
+      }catch(sessionErr){
+        if(sessionErr && sessionErr.code === 'device-locked'){
+          CURRENT_SESSION_ID = null; setLocalSessionId(null);
+          toast('Logged out — this account signed in on another device.');
+          await auth.signOut();
+        }else{
+          console.error('[session] resume check failed, allowing session anyway:', sessionErr);
+          CURRENT_ROLE = 'student';
+          CURRENT_PROFILE = data;
+          STATE.screen = 'student';
+          renderScreen();
+          startSessionHeartbeat();
+        }
+      }
       return;
     }
     // Neither admin nor active student — bounce back to login.
@@ -2109,7 +2299,13 @@ function openStudentDetail(s){
     if(enrollUnsub) enrollUnsub(); overlay.remove();
   });
   $('#resetDevice', overlay).addEventListener('click', async ()=>{
-    await db.collection(COL.students).doc(s.id).update({ deviceId: '' });
+    await db.collection(COL.students).doc(s.id).update({
+      deviceId: '',
+      activeSessionId: '',
+      activeDeviceId: '',
+      sessionStartedAt: null,
+      lastActivityAt: null
+    });
     toast('Device reset — student can log in on a new device now.');
   });
   $('#setFree', overlay).addEventListener('click', async ()=>{
