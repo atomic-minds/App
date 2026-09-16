@@ -8,7 +8,7 @@
 // resilience. Firebase, Firestore's realtime channel, Google Drive,
 // YouTube, and MathJax's CDN are never touched by this file at all.
 
-const CACHE_NAME = 'atomic-minds-v2'; // bumped — forces old caches to be wiped below
+const CACHE_NAME = 'atomic-minds-v3'; 
 const STATIC_ASSETS = ['./manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
