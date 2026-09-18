@@ -361,7 +361,8 @@ const COL = {
   upgradeRequests: 'upgradeRequests',
   batchJoinRequests: 'batchJoinRequests',
   batches: 'batches',
-  enrollments: 'enrollments'
+  enrollments: 'enrollments',
+  announcements: 'announcements'
 };
 
 const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
@@ -512,7 +513,7 @@ const STATE = {
                            // after a failed login signs out) and is only cleared when a new attempt begins
   authNotice: null,       // {screen:'auth', title, body} — sticky SUCCESS-styled message (e.g. "check your email"
                            // after a password-reset request), shown once then cleared
-  studentTab: 'dashboard', // dashboard | classes | tests | notes | profile
+  studentTab: 'dashboard', // dashboard | classes | tests | notes | announcements | profile
   classesSubTab: 'recorded',
   adminTab: 'home',
   testResultCache: {}
@@ -928,6 +929,7 @@ async function doRegister(data){
     membershipExpiry: null,
     active: true,
     deviceId: getDeviceId(),
+    activeBatchIds: [GENERAL_BATCH_ID],
     watchMinutes: 0,
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   });
@@ -1111,7 +1113,7 @@ function renderStudentShell(){
       <button data-tab="classes"><span class="bn-icon">🎬</span>Classes</button>
       <button data-tab="tests"><span class="bn-icon">📝</span>Tests</button>
       <button data-tab="notes"><span class="bn-icon">📄</span>Notes</button>
-      <button data-tab="profile"><span class="bn-icon">👤</span>Profile</button>
+      <button data-tab="announcements"><span class="bn-icon">📢</span>Announcements</button>
     </div>
   </div>`);
   $('#studentHamburger', shell).addEventListener('click', ()=> openStudentDrawer());
@@ -1120,6 +1122,7 @@ function renderStudentShell(){
   else if(STATE.studentTab==='classes') renderClassesTab(contentEl);
   else if(STATE.studentTab==='tests') renderTestsTab(contentEl);
   else if(STATE.studentTab==='notes') renderNotesTab(contentEl);
+  else if(STATE.studentTab==='announcements') renderAnnouncementsTab(contentEl);
   else if(STATE.studentTab==='profile') renderProfileTab(contentEl);
   $all('#studentNav button', shell).forEach(b=> b.classList.toggle('active', b.dataset.tab===STATE.studentTab));
   $('#studentNav', shell).addEventListener('click', e=>{
@@ -1137,7 +1140,8 @@ function openStudentDrawer(){
     { key:'classes', icon:'🎬', label:'Classes', onSelect:()=>{ STATE.studentTab='classes'; renderScreen(); } },
     { key:'tests', icon:'📝', label:'Tests', onSelect:()=>{ STATE.studentTab='tests'; renderScreen(); } },
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.studentTab='notes'; renderScreen(); } },
-    { key:'profile', icon:'👤', label:'Profile', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
+    { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.studentTab='announcements'; renderScreen(); } },
+    { key:'profile', icon:'👤', label:'Profile & Settings', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
     { divider:true },
     { key:'membership', icon: p.membership==='paid' ? '⭐' : '🔓', label: p.membership==='paid' ? 'Paid member' : 'Request paid upgrade', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
@@ -1257,6 +1261,139 @@ async function requestBatchJoin(batch, box){
   }
 }
 
+/* ================================================================
+   BATCH-AWARE CONTENT ACCESS (Phase D)
+   ----------------------------------------------------------------
+   The source of truth for "what batches is this student in" is their
+   ACTIVE, non-expired enrollments — but Firestore Security Rules cannot
+   run a where() query against `enrollments` to check this for a list
+   read (rules can only get() ONE deterministic document, not query a
+   collection). So students/{uid}.activeBatchIds is maintained as a
+   plain array — the one thing a security rule CAN check with a single
+   get() — and every content query is constrained to it with
+   where('batchId','in',[...]) so Firestore itself, not just this
+   JavaScript, refuses to return anything outside it. See
+   firestore.rules for the enforcement side of this.
+   ================================================================ */
+const GENERAL_BATCH_ID = '__general__'; // sentinel batchId: content visible to every active student
+                                          // (must exactly match the literal used in firestore.rules)
+
+/* Given a student's enrollment documents, returns the Set of batchIds
+   they currently have valid access to (status active, and — for a fixed
+   expiry — not yet expired), always including the general marker. */
+function computeValidBatchIds(enrollmentDocs){
+  const ids = new Set([GENERAL_BATCH_ID]);
+  const now = Date.now();
+  enrollmentDocs.forEach(e=>{
+    if(e.status !== 'active') return; // suspended, or any other non-active status
+    if(e.expiryType === 'fixed' && e.expiresAt){
+      const expMs = e.expiresAt.toDate ? e.expiresAt.toDate().getTime() : new Date(e.expiresAt).getTime();
+      if(expMs <= now) return; // expired
+    }
+    if(e.batchId) ids.add(e.batchId);
+  });
+  return ids;
+}
+
+/* ADMIN-PRIVILEGED. Recomputes and overwrites one student's
+   activeBatchIds from their current enrollments. Firestore rules only
+   let a student SHRINK their own array (see firestore.rules), so
+   granting access — a new enrollment, reactivating a suspended one —
+   can only be written by an admin. Call this after every enrollment
+   create/suspend/reactivate/delete and after deleting a batch, so the
+   authorization map never drifts from the real enrollment data. */
+async function syncStudentActiveBatchIds(studentId){
+  try{
+    const snap = await db.collection(COL.enrollments).where('studentId','==',studentId).get();
+    const docs = []; snap.forEach(d=> docs.push(d.data()));
+    const ids = Array.from(computeValidBatchIds(docs));
+    await db.collection(COL.students).doc(studentId).update({ activeBatchIds: ids });
+  }catch(e){
+    console.error('[batch-access] could not sync activeBatchIds for', studentId, e);
+  }
+}
+
+/* STUDENT-SIDE. Re-reads this student's own activeBatchIds (fresh from
+   Firestore, not the possibly-stale in-memory CURRENT_PROFILE) and their
+   current enrollments, then trims any id that's no longer valid — a
+   fixed-term enrollment that just expired shouldn't have to wait for an
+   admin to notice. This can only ever SHRINK the array (rules enforce
+   that), never grant anything new; a freshly-approved enrollment an
+   admin hasn't synced yet simply isn't visible until they do, or until
+   the student's next login after that sync — fail-closed by design.
+   Returns the ids that are SAFE to query content with right now (i.e.
+   already present in the server-side record), or [] if none. */
+async function syncAndGetMyBatchIds(){
+  let current = [];
+  try{
+    const selfDoc = await db.collection(COL.students).doc(CURRENT_USER.uid).get();
+    current = (selfDoc.exists && Array.isArray(selfDoc.data().activeBatchIds)) ? selfDoc.data().activeBatchIds : [];
+  }catch(e){
+    console.error('[batch-access] could not read own activeBatchIds, failing closed:', e);
+    return [];
+  }
+  if(!current.length) return [];
+  let validIds;
+  try{
+    const snap = await db.collection(COL.enrollments).where('studentId','==',CURRENT_USER.uid).get();
+    const docs = []; snap.forEach(d=> docs.push(d.data()));
+    validIds = computeValidBatchIds(docs);
+  }catch(e){
+    console.error('[batch-access] could not load enrollments, using last-known access only:', e);
+    return current; // a transient read failure shouldn't punish already-granted access
+  }
+  const shrunk = current.filter(id => validIds.has(id));
+  if(shrunk.length !== current.length){
+    db.collection(COL.students).doc(CURRENT_USER.uid).update({ activeBatchIds: shrunk })
+      .catch(e=> console.error('[batch-access] self-shrink write failed (non-blocking):', e));
+  }
+  return shrunk;
+}
+
+/* Firestore's `in` operator accepts at most 30 values. Sets up one
+   real-time listener per chunk of batchIds — for this app's scale a
+   student almost never has more than a couple of batches, so this is
+   normally a single listener, but it stays correct if that changes —
+   and calls onChange with the merged, de-duplicated result set whenever
+   any chunk updates, preserving the app's existing live-update behavior
+   instead of downgrading content tabs to a one-time fetch. Returns an
+   unsubscribe function that stops all of them; register it with
+   trackUnsub() same as any other listener.
+
+   isPaid decides whether paid-only content is even included: a free
+   student's query always adds the freeFilter constraint (e.g.
+   access=='free', or paidOnly==false for notes — the two collections use
+   different field names for the same idea), so paid documents are never
+   fetched at all, not just hidden in the UI. The matching firestore.rules
+   content rule independently checks the caller's own membership too, so
+   tampering with this client-side flag to omit the filter doesn't help:
+   the rule would reject the whole query unless the caller is genuinely a
+   paid student server-side. Pass freeFilter as {field, value} — the
+   field/value that marks an item as free (e.g. {field:'access',
+   value:'free'} or {field:'paidOnly', value:false}). */
+function listenContentByBatchIds(collectionName, batchIds, isPaid, freeFilter, onChange, onError){
+  if(!batchIds.length){ onChange([]); return ()=>{}; }
+  const chunks = [];
+  for(let i=0;i<batchIds.length;i+=30) chunks.push(batchIds.slice(i,i+30));
+  const chunkResults = chunks.map(()=> []);
+  function emit(){
+    const seen = new Set(), merged = [];
+    chunkResults.forEach(list=> list.forEach(item=>{
+      if(seen.has(item.id)) return; seen.add(item.id); merged.push(item);
+    }));
+    onChange(merged);
+  }
+  const unsubs = chunks.map((chunk, i) => {
+    let q = db.collection(collectionName).where('batchId','in',chunk);
+    if(!isPaid) q = q.where(freeFilter.field,'==',freeFilter.value);
+    return q.onSnapshot(snap=>{
+      chunkResults[i] = []; snap.forEach(d=> chunkResults[i].push({id:d.id, ...d.data()}));
+      emit();
+    }, err=>{ console.error(err); if(onError) onError(err); });
+  });
+  return ()=> unsubs.forEach(u=>u());
+}
+
 function renderClassesTab(container){
   const subTabs = el(`<div class="tab-filter">
     <button data-sub="recorded">📹 Recorded</button>
@@ -1272,24 +1409,22 @@ function renderClassesTab(container){
 
   const listBox = el(`<div><div class="spinner"></div></div>`);
   container.appendChild(listBox);
-  const myBatch = CURRENT_PROFILE.batch || '';
 
-  if(STATE.classesSubTab === 'recorded'){
-    const unsub = db.collection(COL.videos).onSnapshot(snap=>{
-      const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
-      const mine = items.filter(v => !v.batch || v.batch===myBatch || v.batch==='All batches');
-      renderVideoList(listBox, mine);
-    }, err=> console.error(err));
-    trackUnsub(unsub);
-  } else {
-    const unsub = db.collection(COL.liveClasses).onSnapshot(snap=>{
-      const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
-      const mine = items.filter(v => !v.batch || v.batch===myBatch || v.batch==='All batches');
-      mine.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
-      renderLiveList(listBox, mine);
-    }, err=> console.error(err));
-    trackUnsub(unsub);
-  }
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const isPaid = CURRENT_PROFILE.membership === 'paid';
+    if(STATE.classesSubTab === 'recorded'){
+      const unsub = listenContentByBatchIds(COL.videos, ids, isPaid, {field:'access',value:'free'}, items=> renderVideoList(listBox, items),
+        ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+      trackUnsub(unsub);
+    } else {
+      const unsub = listenContentByBatchIds(COL.liveClasses, ids, isPaid, {field:'access',value:'free'}, items=>{
+        items.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
+        renderLiveList(listBox, items);
+      }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+      trackUnsub(unsub);
+    }
+  });
 }
 
 function renderVideoList(box, items){
@@ -1392,7 +1527,6 @@ function renderTestsTab(container){
 
   let allTests = [];
   let myResults = {};
-  const myBatch = CURRENT_PROFILE.batch || '';
 
   db.collection(COL.testResults).where('studentId','==',CURRENT_USER.uid).get().then(snap=>{
     myResults = {};
@@ -1400,12 +1534,14 @@ function renderTestsTab(container){
     applyFilter();
   }).catch(()=>{});
 
-  const unsub = db.collection(COL.tests).onSnapshot(snap=>{
-    allTests = []; snap.forEach(d=> allTests.push({id:d.id, ...d.data()}));
-    allTests = allTests.filter(t => !t.batch || t.batch===myBatch || t.batch==='All batches');
-    applyFilter();
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const unsub = listenContentByBatchIds(COL.tests, ids, CURRENT_PROFILE.membership === 'paid', {field:'access',value:'free'}, items=>{
+      allTests = items;
+      applyFilter();
+    }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+    trackUnsub(unsub);
   });
-  trackUnsub(unsub);
 
   function applyFilter(){
     const filtered = currentFilter==='all' ? allTests : allTests.filter(t=>t.type===currentFilter);
@@ -1496,7 +1632,6 @@ function renderNotesTab(container){
   container.appendChild(listBox);
 
   let currentFilter='all', allNotes=[];
-  const myBatch = CURRENT_PROFILE.batch||'';
   $all('button', filterRow).forEach(b=> b.classList.toggle('active', b.dataset.f===currentFilter));
   filterRow.addEventListener('click', e=>{
     const b=e.target.closest('button'); if(!b) return;
@@ -1504,12 +1639,14 @@ function renderNotesTab(container){
     $all('button',filterRow).forEach(x=>x.classList.toggle('active',x===b));
     apply();
   });
-  const unsub = db.collection(COL.notes).onSnapshot(snap=>{
-    allNotes=[]; snap.forEach(d=>allNotes.push({id:d.id,...d.data()}));
-    allNotes = allNotes.filter(n=> !n.batch || n.batch===myBatch || n.batch==='All batches');
-    apply();
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const unsub = listenContentByBatchIds(COL.notes, ids, CURRENT_PROFILE.membership === 'paid', {field:'paidOnly',value:false}, items=>{
+      allNotes = items;
+      apply();
+    }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+    trackUnsub(unsub);
   });
-  trackUnsub(unsub);
   function apply(){
     const filtered = currentFilter==='all'?allNotes:allNotes.filter(n=>n.fileType===currentFilter);
     renderNotesList(listBox, filtered);
@@ -1556,6 +1693,27 @@ function driveIdFromUrl(url){
   m = url.match(/[?&]id=([A-Za-z0-9_-]+)/);
   if(m) return m[1];
   return url; // maybe they already pasted just the raw ID
+}
+
+/* Populates a <select> with a "visible to every student" option plus
+   every currently-active batch, used by every admin content-creation
+   form (recorded classes, live classes, both test builders, notes/
+   assignments) so the admin picks a real batch — or deliberately marks
+   content as general — instead of typing a free-text name. The general
+   option's value is GENERAL_BATCH_ID, the same sentinel every active
+   student's activeBatchIds always includes (see firestore.rules), so
+   content saved with it is immediately, securely visible to everyone
+   without needing a batch/enrollment at all. One-time fetch (matches the
+   same pattern already used for the student-enrollment batch search
+   above) rather than a live listener — the dropdown doesn't need to be
+   real-time. */
+function loadActiveBatchesInto(selectEl){
+  selectEl.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">🎁 Free Demo — All Students</option>`));
+  db.collection(COL.batches).where('status','==','active').get().then(snap=>{
+    const batches = []; snap.forEach(d=> batches.push({id:d.id, name:d.data().name||'(unnamed batch)'}));
+    batches.sort((a,b)=> a.name.localeCompare(b.name));
+    batches.forEach(b=> selectEl.appendChild(el(`<option value="${esc(b.id)}">${esc(b.name)}</option>`)));
+  }).catch(e=>{ console.error('[batches] could not load batch list:', e); });
 }
 
 function openPdfViewer(n){
@@ -1618,6 +1776,69 @@ async function requestUpgrade(box){
     console.error(e);
     toast('Could not send request — check your connection.');
   }
+}
+
+/* ================================================================
+   ANNOUNCEMENTS (Phase E)
+   ----------------------------------------------------------------
+   Same batch-authorization model as Classes/Tests/Notes: the query is
+   constrained to the student's own activeBatchIds (which always
+   includes GENERAL_BATCH_ID), and firestore.rules independently
+   re-verifies that server-side — see listenContentByBatchIds() and
+   firestore.rules' announcements section. Read state is a lightweight,
+   self-only array on the student's own document (students/{uid}.
+   readAnnouncementIds) — already permitted by the existing self-update
+   rule, since it isn't one of the three locked fields (membership,
+   active, activeBatchIds), so no rules change was needed for it.
+   ================================================================ */
+function renderAnnouncementsTab(container){
+  const listBox = el(`<div><div class="spinner"></div></div>`);
+  container.appendChild(listBox);
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const unsub = listenContentByBatchIds(COL.announcements, ids, true, null, items=>{
+      items.sort((a,b)=>{
+        const at = (a.createdAt && a.createdAt.toDate) ? a.createdAt.toDate().getTime() : 0;
+        const bt = (b.createdAt && b.createdAt.toDate) ? b.createdAt.toDate().getTime() : 0;
+        return bt - at; // newest first
+      });
+      renderAnnouncementsList(listBox, items);
+    }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; }, {field:'active', value:true});
+    trackUnsub(unsub);
+  });
+}
+
+function renderAnnouncementsList(box, items){
+  box.innerHTML='';
+  if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📢</div>No announcements yet.</div>`)); return; }
+  const readIds = new Set((CURRENT_PROFILE && CURRENT_PROFILE.readAnnouncementIds) || []);
+  items.forEach(a=>{
+    const isUnread = !readIds.has(a.id);
+    const card = el(`<div class="item-card" style="cursor:pointer">
+      <div class="item-top"><div class="item-icon">📢</div><div class="item-info">
+        <div class="item-title">${esc(a.title)}</div>
+        <div class="item-meta" style="white-space:pre-wrap">${esc(a.message)}</div>
+        <div class="item-badges">
+          ${isUnread ? '<span class="badge badge-paid">🆕 New</span>' : ''}
+          <span class="badge badge-muted">${esc(a.batchName||'')}</span>
+          <span class="badge badge-muted">${fmtDate(a.createdAt)}</span>
+        </div>
+      </div></div>
+    </div>`);
+    if(isUnread) card.addEventListener('click', ()=> markAnnouncementRead(a.id), {once:true});
+    box.appendChild(card);
+  });
+}
+
+function markAnnouncementRead(id){
+  if(!CURRENT_USER) return;
+  if(CURRENT_PROFILE){
+    CURRENT_PROFILE.readAnnouncementIds = Array.from(new Set([...(CURRENT_PROFILE.readAnnouncementIds||[]), id]));
+  }
+  db.collection(COL.students).doc(CURRENT_USER.uid).update({
+    readAnnouncementIds: firebase.firestore.FieldValue.arrayUnion(id)
+  }).catch(e=> console.error('[announcements] could not mark read (non-blocking):', e));
+  renderScreen();
 }
 
 function renderProfileTab(container){
@@ -1829,6 +2050,7 @@ function renderAdminShell(){
     else if(STATE.adminTab==='classes') renderAdminClasses(content);
     else if(STATE.adminTab==='tests') renderAdminTests(content);
     else if(STATE.adminTab==='notes') renderAdminNotes(content);
+    else if(STATE.adminTab==='announcements') renderAdminAnnouncements(content);
     else if(STATE.adminTab==='requests') renderAdminUpgradeRequests(content);
   }
   return shell;
@@ -1842,6 +2064,7 @@ function openAdminDrawer(){
     { key:'classes', icon:'🎬', label:'Classes', onSelect:()=>{ STATE.adminTab='classes'; renderScreen(); } },
     { key:'tests', icon:'📝', label:'Tests', onSelect:()=>{ STATE.adminTab='tests'; renderScreen(); } },
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.adminTab='notes'; renderScreen(); } },
+    { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.adminTab='announcements'; renderScreen(); } },
     { key:'requests', icon:'⭐', label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
@@ -1862,6 +2085,7 @@ function renderAdminHome(container){
       <button class="home-tile" data-t="classes"><span class="ht-icon">🎬</span><span class="ht-label">Classes</span></button>
       <button class="home-tile" data-t="tests"><span class="ht-icon">📝</span><span class="ht-label">Tests</span></button>
       <button class="home-tile" data-t="notes"><span class="ht-icon">📄</span><span class="ht-label">Notes</span></button>
+      <button class="home-tile" data-t="announcements"><span class="ht-icon">📢</span><span class="ht-label">Announcements</span></button>
       <button class="home-tile" data-t="requests" style="position:relative">
         <span class="ht-icon">⭐</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
@@ -1990,6 +2214,7 @@ function drawBatchJoinRequests(container){
                 createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                 updatedAt: firebase.firestore.FieldValue.serverTimestamp()
               });
+              await syncStudentActiveBatchIds(r.studentId);
             }
             await db.collection(COL.batchJoinRequests).doc(r.id).update({ status:'approved' });
             toast(already ? 'Already enrolled — request marked approved' : 'Approved — student enrolled');
@@ -2026,10 +2251,12 @@ function renderAdminBatches(container){
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
         If students already have an old free-text batch name on their profile, run this once to create a
         matching batch for each distinct name and enroll those students into it (lifetime expiry, so nobody
-        currently active loses access). Safe to run more than once — it skips names that already have a
-        matching batch and students already enrolled.
+        currently active loses access). This also (re)syncs every student's secure batch-access record from
+        their current enrollments — run it again any time you want to force a resync (e.g. right after
+        deploying this update, so existing students get access without you having to open each one).
+        Safe to run more than once.
       </div>
-      <button class="btn btn-ghost" id="runMigrationBtn">Migrate existing batch names</button>
+      <button class="btn btn-ghost" id="runMigrationBtn">Migrate batch names &amp; sync access</button>
     </div>
     <div class="card-title" style="margin:14px 0 8px">All batches</div>
     <div id="batchList"><div class="spinner"></div></div>
@@ -2123,9 +2350,11 @@ function openBatchDetail(batch){
     if(!confirm('Delete this batch? Enrolled students lose this enrollment only — their account, results and payments are untouched.')) return;
     try{
       const enrollSnap = await db.collection(COL.enrollments).where('batchId','==',batch.id).get();
-      const dels = []; enrollSnap.forEach(d=> dels.push(db.collection(COL.enrollments).doc(d.id).delete()));
+      const affectedStudentIds = []; const dels = [];
+      enrollSnap.forEach(d=>{ affectedStudentIds.push(d.data().studentId); dels.push(db.collection(COL.enrollments).doc(d.id).delete()); });
       await Promise.all(dels);
       await db.collection(COL.batches).doc(batch.id).delete();
+      await Promise.all(affectedStudentIds.map(id=> syncStudentActiveBatchIds(id)));
       toast('Batch deleted'); overlay.remove();
     }catch(e){ console.error(e); toast('Could not delete — check your connection.'); }
   });
@@ -2155,6 +2384,7 @@ function openBatchDetail(batch){
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
           });
+          await syncStudentActiveBatchIds(s.id);
           toast('Enrolled ' + s.fullName);
           $('#enrollSearch',overlay).value=''; resultsBox.innerHTML='';
         }catch(e){ console.error(e); toast('Could not enroll — check your connection.'); }
@@ -2187,9 +2417,11 @@ function openBatchDetail(batch){
         try{
           if(b.dataset.act==='toggle'){
             await db.collection(COL.enrollments).doc(e.id).update({ status: e.status==='active'?'suspended':'active', updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            await syncStudentActiveBatchIds(e.studentId);
             toast('Updated');
           } else if(b.dataset.act==='remove'){
             await db.collection(COL.enrollments).doc(e.id).delete();
+            await syncStudentActiveBatchIds(e.studentId);
             toast('Removed from batch');
           }
         }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
@@ -2217,30 +2449,38 @@ async function runBatchMigration(){
     let created = 0, enrolled = 0;
     for(const s of students){
       const name = (s.batch||'').trim();
-      if(!name) continue;
-      let batchId = existingByName[name];
-      if(!batchId){
-        const ref = await db.collection(COL.batches).add({
-          name, description:'', status:'active', defaultExpiryType:'lifetime', defaultExpiresAt:null,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-        batchId = ref.id;
-        existingByName[name] = batchId;
-        created++;
+      if(name){
+        let batchId = existingByName[name];
+        if(!batchId){
+          const ref = await db.collection(COL.batches).add({
+            name, description:'', status:'active', defaultExpiryType:'lifetime', defaultExpiresAt:null,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          batchId = ref.id;
+          existingByName[name] = batchId;
+          created++;
+        }
+        const already = await db.collection(COL.enrollments).where('studentId','==',s.id).get();
+        let hasIt = false;
+        already.forEach(d=>{ if(d.data().batchId===batchId) hasIt = true; });
+        if(!hasIt){
+          await db.collection(COL.enrollments).add({
+            studentId: s.id, batchId, batchName: name,
+            status:'active', expiryType:'lifetime', expiresAt:null,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          enrolled++;
+        }
       }
-      const already = await db.collection(COL.enrollments).where('studentId','==',s.id).get();
-      let hasIt = false;
-      already.forEach(d=>{ if(d.data().batchId===batchId) hasIt = true; });
-      if(hasIt) continue;
-      await db.collection(COL.enrollments).add({
-        studentId: s.id, batchId, batchName: name,
-        status:'active', expiryType:'lifetime', expiresAt:null,
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-      enrolled++;
+      // (Re)sync every student's rules-checkable activeBatchIds from their
+      // current enrollments, whether or not this run touched them above —
+      // this is what actually gives existing students (created before
+      // Phase D.5) working batch access without an admin opening each one
+      // individually, and is safe to re-run any time as a resync.
+      await syncStudentActiveBatchIds(s.id);
     }
-    toast(`Migration done — ${created} batch(es) created, ${enrolled} student(s) enrolled.`);
+    toast(`Migration done — ${created} batch(es) created, ${enrolled} enrolled, ${students.length} student(s) synced.`);
   }catch(e){
     console.error(e);
     toast('Migration failed — check console.');
@@ -2409,9 +2649,11 @@ function openStudentDetail(s){
         try{
           if(b.dataset.act==='toggle'){
             await db.collection(COL.enrollments).doc(e.id).update({ status: e.status==='active'?'suspended':'active', updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            await syncStudentActiveBatchIds(e.studentId);
             toast('Updated');
           } else if(b.dataset.act==='remove'){
             await db.collection(COL.enrollments).doc(e.id).delete();
+            await syncStudentActiveBatchIds(e.studentId);
             toast('Removed from batch');
           }
         }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
@@ -2446,6 +2688,7 @@ function openStudentDetail(s){
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
           });
+          await syncStudentActiveBatchIds(s.id);
           toast('Enrolled into ' + b.name);
           $('#detailBatchSearch',overlay).value=''; resultsBox.innerHTML='';
         }catch(err){ console.error(err); toast('Could not enroll — check your connection.'); }
@@ -2506,7 +2749,7 @@ function drawRecordedForm(body){
       <div class="field"><label>Title</label><input id="vTitle" placeholder="Class 27 — Electric Current Part 01"></div>
       <div class="row2">
         <div class="field"><label>Subject</label><input id="vSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><input id="vBatch" placeholder="Class 12 Physics 2026"></div>
+        <div class="field"><label>Batch</label><select id="vBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
         <div class="field"><label>Chapter</label><input id="vChapter" placeholder="Electric Current"></div>
@@ -2521,19 +2764,25 @@ function drawRecordedForm(body){
     <div class="card-title" style="margin:14px 0 8px">Uploaded videos</div>
     <div id="videosAdminList"><div class="spinner"></div></div>
   </div>`));
+  loadActiveBatchesInto($('#vBatch', body));
   $('#saveVideo', body).addEventListener('click', async ()=>{
     const url = $('#vUrl',body).value.trim();
     const title = $('#vTitle',body).value.trim();
+    const batchSel = $('#vBatch',body);
+    const batchId = batchSel.value;
     if(!url || !title){ toast('Fill link and title'); return; }
+    if(!batchId){ toast('Select a batch'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.videos).add({
       ytId: ytIdFromUrl(url), title,
-      subject: $('#vSubject',body).value.trim(), batch: $('#vBatch',body).value.trim(),
+      subject: $('#vSubject',body).value.trim(), batchId, batchName,
       chapter: $('#vChapter',body).value.trim(), classNo: $('#vClassNo',body).value.trim(),
       duration: $('#vDuration',body).value.trim(), access: $('#vAccess',body).value,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('Saved to Firebase!');
     ['vUrl','vTitle','vChapter','vClassNo','vDuration'].forEach(id=> $('#'+id,body).value='');
+    batchSel.value = '';
   });
   const listBox = $('#videosAdminList', body);
   const unsub = db.collection(COL.videos).onSnapshot(snap=>{
@@ -2544,7 +2793,7 @@ function drawRecordedForm(body){
       const card = el(`<div class="item-card">
         <div class="item-top"><div class="item-icon">▶️</div><div class="item-info">
           <div class="item-title">${esc(v.title)}</div>
-          <div class="item-meta">${esc(v.subject||'')}${v.batch?(' · '+esc(v.batch)):''}</div>
+          <div class="item-meta">${esc(v.subject||'')}${(v.batchName||v.batch)?(' · '+esc(v.batchName||v.batch)):''}</div>
           <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'Paid':'Free'}</span></div>
         </div></div>
         <div class="item-actions"><button class="btn-sm btn-danger">🗑 Delete</button></div>
@@ -2564,7 +2813,7 @@ function drawLiveForm(body){
       <div class="field"><label>Title</label><input id="lTitle" placeholder="Live Class 28 — EM Induction"></div>
       <div class="row2">
         <div class="field"><label>Subject</label><input id="lSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><input id="lBatch" placeholder="Class 12 Physics 2026"></div>
+        <div class="field"><label>Batch</label><select id="lBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
         <div class="field"><label>Date</label><input type="date" id="lDate"></div>
@@ -2576,17 +2825,22 @@ function drawLiveForm(body){
     <div class="card-title" style="margin:14px 0 8px">Scheduled classes</div>
     <div id="liveAdminList"><div class="spinner"></div></div>
   </div>`));
+  loadActiveBatchesInto($('#lBatch', body));
   $('#saveLive', body).addEventListener('click', async ()=>{
     const url = $('#lUrl',body).value.trim();
     const title = $('#lTitle',body).value.trim();
+    const batchSel = $('#lBatch',body);
+    const batchId = batchSel.value;
     if(!url || !title){ toast('Fill link and title'); return; }
+    if(!batchId){ toast('Select a batch'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.liveClasses).add({
-      meetLink: url, title, subject: $('#lSubject',body).value.trim(), batch: $('#lBatch',body).value.trim(),
+      meetLink: url, title, subject: $('#lSubject',body).value.trim(), batchId, batchName,
       date: $('#lDate',body).value, time: $('#lTime',body).value, access: $('#lAccess',body).value,
       status: 'upcoming', createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('Saved to Firebase!');
-    $('#lUrl',body).value=''; $('#lTitle',body).value='';
+    $('#lUrl',body).value=''; $('#lTitle',body).value=''; batchSel.value='';
   });
   const listBox = $('#liveAdminList', body);
   const unsub = db.collection(COL.liveClasses).onSnapshot(snap=>{
@@ -2597,7 +2851,7 @@ function drawLiveForm(body){
       const card = el(`<div class="item-card">
         <div class="item-top"><div class="item-icon">${lc.status==='live'?'🔴':lc.status==='ended'?'✅':'📅'}</div><div class="item-info">
           <div class="item-title">${esc(lc.title)}</div>
-          <div class="item-meta">${esc(lc.date||'')}${lc.time?(' · '+esc(lc.time)):''}</div>
+          <div class="item-meta">${esc(lc.date||'')}${lc.time?(' · '+esc(lc.time)):''}${(lc.batchName||lc.batch)?(' · '+esc(lc.batchName||lc.batch)):''}</div>
           <div class="item-badges"><span class="badge ${lc.status==='live'?'badge-live':'badge-muted'}">${esc(lc.status)}</span></div>
         </div></div>
         <div class="item-actions">
@@ -2643,7 +2897,7 @@ function renderAdminTests(container){
       const card = el(`<div class="item-card">
         <div class="item-top"><div class="item-icon">${t.type==='live'?'🔴':t.type==='selfpaced'?'⏱':'📚'}</div><div class="item-info">
           <div class="item-title">${esc(t.title)}</div>
-          <div class="item-meta">${esc(t.subject||'')}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
+          <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?(' · '+esc(t.batchName||t.batch)):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
           <div class="item-badges"><span class="badge badge-accent">${esc(t.type)}</span>${t.access==='paid'?'<span class="badge badge-paid">Paid</span>':'<span class="badge badge-free">Free</span>'}</div>
         </div></div>
         <div class="item-actions">
@@ -2690,7 +2944,7 @@ function drawManualBuilder(body){
       <div class="field"><label>Title</label><input id="mTitle" placeholder="Full Test - 01"></div>
       <div class="row2">
         <div class="field"><label>Subject</label><input id="mSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><input id="mBatch" placeholder="Class 12 Physics 2026"></div>
+        <div class="field"><label>Batch</label><select id="mBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
         <div class="field"><label>Type</label><select id="mType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice (no timer)</option></select></div>
@@ -2722,6 +2976,7 @@ function drawManualBuilder(body){
     </div>
     <button class="btn btn-primary" id="publishManual">🚀 Generate &amp; publish test</button>
   </div>`));
+  loadActiveBatchesInto($('#mBatch', body));
 
   function refreshQList(){
     $('#qCountLbl',body).textContent = '('+questions.length+' added)';
@@ -2745,16 +3000,20 @@ function drawManualBuilder(body){
     const title = $('#mTitle',body).value.trim();
     if(!title){ toast('Enter a test title'); return; }
     if(!questions.length){ toast('Add at least one question'); return; }
+    const batchSel = $('#mBatch',body);
+    const batchId = batchSel.value;
+    if(!batchId){ toast('Select a batch'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     const meta = { title, correctMark: parseFloat($('#mCorrect',body).value)||0, wrongMark: parseFloat($('#mWrong',body).value)||0, duration: parseInt($('#mDuration',body).value)||0 };
     const html = buildTestHTML(meta, questions);
     await db.collection(COL.tests).add({
-      title, subject: $('#mSubject',body).value.trim(), batch: $('#mBatch',body).value.trim(),
+      title, subject: $('#mSubject',body).value.trim(), batchId, batchName,
       type: $('#mType',body).value, access: $('#mAccess',body).value,
       duration: meta.duration, questionCount: questions.length, htmlContent: html, source: 'manual',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('✅ Test published to Firebase!');
-    questions = []; refreshQList(); $('#mTitle',body).value='';
+    questions = []; refreshQList(); $('#mTitle',body).value=''; batchSel.value='';
   });
 }
 
@@ -2769,7 +3028,7 @@ function drawPasteForm(body){
       <div class="field"><label>Title</label><input id="pTitle" placeholder="Full Test - 01"></div>
       <div class="row2">
         <div class="field"><label>Subject</label><input id="pSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><input id="pBatch" placeholder="Class 12 Physics 2026"></div>
+        <div class="field"><label>Batch</label><select id="pBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
         <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice</option></select></div>
@@ -2778,17 +3037,22 @@ function drawPasteForm(body){
       <div class="field"><label>Paste full HTML code</label><textarea id="pHtml" style="min-height:130px;font-family:monospace;font-size:11px"></textarea></div>
       <button class="btn btn-primary" id="publishPaste">🚀 Publish to Firebase</button>
     </div>`));
+  loadActiveBatchesInto($('#pBatch', body));
   $('#publishPaste',body).addEventListener('click', async ()=>{
     const title = $('#pTitle',body).value.trim();
     const html = $('#pHtml',body).value.trim();
+    const batchSel = $('#pBatch',body);
+    const batchId = batchSel.value;
     if(!title || !html){ toast('Fill title and paste HTML'); return; }
+    if(!batchId){ toast('Select a batch'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.tests).add({
-      title, subject: $('#pSubject',body).value.trim(), batch: $('#pBatch',body).value.trim(),
+      title, subject: $('#pSubject',body).value.trim(), batchId, batchName,
       type: $('#pType',body).value, access: $('#pAccess',body).value, htmlContent: html, source: 'pasted',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('✅ Published to Firebase!');
-    $('#pTitle',body).value=''; $('#pHtml',body).value='';
+    $('#pTitle',body).value=''; $('#pHtml',body).value=''; batchSel.value='';
   });
 }
 
@@ -2805,7 +3069,7 @@ function renderAdminNotes(container){
       <div class="field"><label>Title</label><input id="nTitle" placeholder="Chapter 5 — Electric Current Notes"></div>
       <div class="row2">
         <div class="field"><label>Subject</label><input id="nSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><input id="nBatch" placeholder="Class 12 Physics 2026"></div>
+        <div class="field"><label>Batch</label><select id="nBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
         <div class="field"><label>Type</label><select id="nType"><option value="study">Study material</option><option value="assignment">Assignment</option></select></div>
@@ -2818,23 +3082,28 @@ function renderAdminNotes(container){
     <div class="card-title" style="margin:14px 0 8px">Saved files</div>
     <div id="notesAdminList"><div class="spinner"></div></div>
   </div>`));
+  loadActiveBatchesInto($('#nBatch', container));
   $('#uploadNote', container).addEventListener('click', async ()=>{
     const title = $('#nTitle',container).value.trim();
     const link = $('#nDriveLink',container).value.trim();
+    const batchSel = $('#nBatch',container);
+    const batchId = batchSel.value;
     if(!title || !link){ toast('Fill title and paste a Drive link'); return; }
+    if(!batchId){ toast('Select a batch'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     const driveId = driveIdFromUrl(link);
     if(!driveId){ toast('Could not read a file ID from that link'); return; }
     const btn = $('#uploadNote',container); btn.disabled = true; btn.textContent = 'Saving…';
     try{
       await db.collection(COL.notes).add({
-        title, subject: $('#nSubject',container).value.trim(), batch: $('#nBatch',container).value.trim(),
+        title, subject: $('#nSubject',container).value.trim(), batchId, batchName,
         fileType: $('#nType',container).value, paidOnly: $('#nAccess',container).value === 'paid',
         downloadable: $('#nDownload',container).value === 'yes',
         driveId, driveLink: link,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       toast('✅ Saved to Firebase!');
-      $('#nTitle',container).value=''; $('#nDriveLink',container).value='';
+      $('#nTitle',container).value=''; $('#nDriveLink',container).value=''; batchSel.value='';
     }catch(e){
       console.error(e);
       toast('Could not save — check your connection.');
@@ -2850,7 +3119,7 @@ function renderAdminNotes(container){
       const card = el(`<div class="item-card">
         <div class="item-top"><div class="item-icon">${n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div><div class="item-info">
           <div class="item-title">${esc(n.title)}</div>
-          <div class="item-meta">${esc(n.subject||'')}</div>
+          <div class="item-meta">${esc(n.subject||'')}${(n.batchName||n.batch)?(' · '+esc(n.batchName||n.batch)):''}</div>
           <div class="item-badges">
             <span class="badge ${n.downloadable?'badge-free':'badge-paid'}">${n.downloadable?'Downloadable':'View-only'}</span>
             ${n.paidOnly?'<span class="badge badge-paid">Paid</span>':''}
@@ -2862,6 +3131,130 @@ function renderAdminNotes(container){
       listBox.appendChild(card);
     });
   });
+  trackUnsub(unsub);
+}
+
+/* ================================================================
+   ADMIN — Announcements (Phase E)
+   ----------------------------------------------------------------
+   One form doubles as create and edit (this app has no existing
+   edit-in-place pattern to follow, so this is the minimal version: the
+   same fields, an editingId closure var, and the Save button switches
+   between adding a new doc and updating the existing one so editing
+   never creates a duplicate). Audience uses the same batch dropdown
+   helper as every other content form, including the Free Demo/general
+   option added in Phase D.5.
+   ================================================================ */
+function renderAdminAnnouncements(container){
+  container.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title" id="annFormTitle">📢 New announcement</div>
+      <div class="field"><label>Title</label><input id="annTitle" placeholder="Class Cancelled"></div>
+      <div class="field"><label>Message</label><textarea id="annMessage" style="min-height:90px" placeholder="Today's chemistry class has been postponed to tomorrow at 7 PM."></textarea></div>
+      <div class="field"><label>Audience</label><select id="annBatch"><option value="">Select audience...</option></select></div>
+      <div class="row2">
+        <button class="btn btn-primary" id="saveAnnouncement">📢 Post announcement</button>
+        <button class="btn btn-ghost" id="cancelEditAnn" style="display:none">Cancel edit</button>
+      </div>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">All announcements</div>
+    <div id="announcementsAdminList"><div class="spinner"></div></div>
+  </div>`));
+  loadActiveBatchesInto($('#annBatch', container));
+
+  let editingId = null;
+  function resetAnnForm(){
+    editingId = null;
+    $('#annFormTitle', container).textContent = '📢 New announcement';
+    $('#annTitle', container).value = '';
+    $('#annMessage', container).value = '';
+    $('#annBatch', container).value = '';
+    $('#saveAnnouncement', container).textContent = '📢 Post announcement';
+    $('#cancelEditAnn', container).style.display = 'none';
+  }
+  $('#cancelEditAnn', container).addEventListener('click', resetAnnForm);
+
+  $('#saveAnnouncement', container).addEventListener('click', async ()=>{
+    const title = $('#annTitle',container).value.trim();
+    const message = $('#annMessage',container).value.trim();
+    const batchSel = $('#annBatch',container);
+    const batchId = batchSel.value;
+    if(!title || !message){ toast('Fill in title and message'); return; }
+    if(!batchId){ toast('Select an audience'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const btn = $('#saveAnnouncement',container); btn.disabled = true;
+    try{
+      if(editingId){
+        await db.collection(COL.announcements).doc(editingId).update({
+          title, message, batchId, batchName,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        toast('Announcement updated');
+      } else {
+        await db.collection(COL.announcements).add({
+          title, message, batchId, batchName, active: true,
+          createdBy: CURRENT_USER.uid,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        toast('Announcement posted');
+      }
+      resetAnnForm();
+    }catch(e){
+      console.error(e);
+      toast('Could not save — check your connection.');
+    }
+    btn.disabled = false;
+  });
+
+  const listBox = $('#announcementsAdminList', container);
+  const unsub = db.collection(COL.announcements).orderBy('createdAt','desc').onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No announcements yet.</div>'; return; }
+    items.forEach(a=>{
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">📢</div><div class="item-info">
+          <div class="item-title">${esc(a.title)}</div>
+          <div class="item-meta" style="white-space:pre-wrap">${esc(a.message)}</div>
+          <div class="item-badges">
+            <span class="badge badge-muted">${esc(a.batchName||'')}</span>
+            <span class="badge ${a.active===false?'badge-muted':'badge-free'}">${a.active===false?'Inactive':'Active'}</span>
+            <span class="badge badge-muted">${fmtDate(a.createdAt)}</span>
+          </div>
+        </div></div>
+        <div class="item-actions">
+          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${a.active===false?'✅ Activate':'⏸ Deactivate'}</button>
+          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+        </div>
+      </div>`);
+      $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
+        if(b.dataset.act==='edit'){
+          editingId = a.id;
+          $('#annFormTitle', container).textContent = '✏️ Edit announcement';
+          $('#annTitle', container).value = a.title||'';
+          $('#annMessage', container).value = a.message||'';
+          $('#annBatch', container).value = a.batchId||'';
+          $('#saveAnnouncement', container).textContent = '💾 Update announcement';
+          $('#cancelEditAnn', container).style.display = '';
+        } else if(b.dataset.act==='toggle'){
+          try{
+            await db.collection(COL.announcements).doc(a.id).update({ active: a.active===false, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            toast(a.active===false ? 'Activated' : 'Deactivated');
+          }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
+        } else if(b.dataset.act==='del'){
+          if(!confirm('Delete this announcement? Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.')) return;
+          try{
+            await db.collection(COL.announcements).doc(a.id).delete();
+            toast('Deleted');
+            if(editingId===a.id) resetAnnForm();
+          }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
+        }
+      }));
+      listBox.appendChild(card);
+    });
+  }, err=> console.error(err));
   trackUnsub(unsub);
 }
 
