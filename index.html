@@ -189,6 +189,17 @@ mjx-container{color:var(--text) !important}
 .item-title{font-size:13.5px;font-weight:600}
 .item-meta{font-size:11px;color:var(--text-dim);margin-top:2px;line-height:1.6}
 .item-badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.cal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-title{font-size:14.5px;font-weight:700}
+.cal-dow{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:10.5px;color:var(--text-dim);margin-bottom:4px}
+.cal-days{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:6px}
+.cal-day{position:relative;aspect-ratio:1;display:flex;align-items:center;justify-content:center;
+  border-radius:10px;font-size:12.5px;background:var(--surface);border:1px solid var(--border-soft);cursor:pointer}
+.cal-day.empty{background:none;border:none;cursor:default}
+.cal-day.cal-today{border-color:var(--accent)}
+.cal-day.cal-selected{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cal-dot{position:absolute;bottom:4px;width:4px;height:4px;border-radius:50%;background:var(--accent-bright)}
+.cal-day.cal-selected .cal-dot{background:#fff}
 .item-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
 
 /* -------- modal / overlay -------- */
@@ -362,7 +373,8 @@ const COL = {
   batchJoinRequests: 'batchJoinRequests',
   batches: 'batches',
   enrollments: 'enrollments',
-  announcements: 'announcements'
+  announcements: 'announcements',
+  classSchedules: 'classSchedules'
 };
 
 const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
@@ -513,7 +525,10 @@ const STATE = {
                            // after a failed login signs out) and is only cleared when a new attempt begins
   authNotice: null,       // {screen:'auth', title, body} — sticky SUCCESS-styled message (e.g. "check your email"
                            // after a password-reset request), shown once then cleared
-  studentTab: 'dashboard', // dashboard | classes | tests | notes | announcements | profile
+  studentTab: 'dashboard', // dashboard | classes | tests | notes | announcements | profile | calendar
+  calendarYear: null,      // lazily set to the current year on first Calendar render
+  calendarMonthIdx: null,  // 0-11, lazily set to the current month
+  calendarSelectedDate: null, // 'YYYY-MM-DD', lazily set to today
   classesSubTab: 'recorded',
   adminTab: 'home',
   testResultCache: {}
@@ -1123,6 +1138,7 @@ function renderStudentShell(){
   else if(STATE.studentTab==='tests') renderTestsTab(contentEl);
   else if(STATE.studentTab==='notes') renderNotesTab(contentEl);
   else if(STATE.studentTab==='announcements') renderAnnouncementsTab(contentEl);
+  else if(STATE.studentTab==='calendar') renderCalendarTab(contentEl);
   else if(STATE.studentTab==='profile') renderProfileTab(contentEl);
   $all('#studentNav button', shell).forEach(b=> b.classList.toggle('active', b.dataset.tab===STATE.studentTab));
   $('#studentNav', shell).addEventListener('click', e=>{
@@ -1141,6 +1157,7 @@ function openStudentDrawer(){
     { key:'tests', icon:'📝', label:'Tests', onSelect:()=>{ STATE.studentTab='tests'; renderScreen(); } },
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.studentTab='notes'; renderScreen(); } },
     { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.studentTab='announcements'; renderScreen(); } },
+    { key:'calendar', icon:'📅', label:'Calendar', onSelect:()=>{ STATE.studentTab='calendar'; renderScreen(); } },
     { key:'profile', icon:'👤', label:'Profile & Settings', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
     { divider:true },
     { key:'membership', icon: p.membership==='paid' ? '⭐' : '🔓', label: p.membership==='paid' ? 'Paid member' : 'Request paid upgrade', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
@@ -1392,6 +1409,153 @@ function listenContentByBatchIds(collectionName, batchIds, isPaid, freeFilter, o
     }, err=>{ console.error(err); if(onError) onError(err); });
   });
   return ()=> unsubs.forEach(u=>u());
+}
+
+/* ================================================================
+   CALENDAR / CLASS SCHEDULE (Phase F)
+   ----------------------------------------------------------------
+   New students/{uid}.activeBatchIds + GENERAL_BATCH_ID authorization
+   model — same as Classes/Tests/Notes/Announcements, nothing new. Kept
+   as a separate collection (classSchedules) from liveClasses: liveClasses
+   is specifically "join this live video call" (single time, meetLink,
+   upcoming/live/ended status); the Calendar is the broader "what's
+   happening when" schedule (start+end time, topic, cancel/reschedule).
+   Merging them would have meant reworking liveClasses' existing status
+   model and risking its working join-link flow for no real benefit —
+   they can both describe the same real class if an admin wants, but
+   nothing here links or syncs them automatically.
+
+   listenScheduleByBatchIds() is intentionally separate from
+   listenContentByBatchIds() rather than extending it: a monthly
+   calendar needs an additional date-range constraint that helper was
+   never built for, and changing its signature would mean touching five
+   already-working call sites (videos/liveClasses/tests/notes/
+   announcements) for the sake of one new one. Requires a composite
+   Firestore index on classSchedules (batchId, date) — see the summary
+   for the one-time setup step. */
+function pad2(n){ return String(n).padStart(2,'0'); }
+function ymd(y,m,d){ return `${y}-${pad2(m+1)}-${pad2(d)}`; }
+function todayYMD(){ const t=new Date(); return ymd(t.getFullYear(), t.getMonth(), t.getDate()); }
+
+function listenScheduleByBatchIds(batchIds, firstDay, lastDay, onChange, onError){
+  if(!batchIds.length){ onChange([]); return ()=>{}; }
+  const chunks = [];
+  for(let i=0;i<batchIds.length;i+=30) chunks.push(batchIds.slice(i,i+30));
+  const chunkResults = chunks.map(()=> []);
+  function emit(){
+    const seen = new Set(), merged = [];
+    chunkResults.forEach(list=> list.forEach(item=>{
+      if(seen.has(item.id)) return; seen.add(item.id); merged.push(item);
+    }));
+    onChange(merged);
+  }
+  const unsubs = chunks.map((chunk, i) =>
+    db.collection(COL.classSchedules)
+      .where('batchId','in',chunk)
+      .where('date','>=',firstDay)
+      .where('date','<=',lastDay)
+      .onSnapshot(snap=>{
+        chunkResults[i] = []; snap.forEach(d=> chunkResults[i].push({id:d.id, ...d.data()}));
+        emit();
+      }, err=>{ console.error(err); if(onError) onError(err); })
+  );
+  return ()=> unsubs.forEach(u=>u());
+}
+
+function renderCalendarTab(container){
+  const now = new Date();
+  if(STATE.calendarYear==null){ STATE.calendarYear = now.getFullYear(); STATE.calendarMonthIdx = now.getMonth(); }
+  if(!STATE.calendarSelectedDate) STATE.calendarSelectedDate = todayYMD();
+
+  const y = STATE.calendarYear, m = STATE.calendarMonthIdx;
+  const firstDay = ymd(y,m,1);
+  const daysInMonth = new Date(y, m+1, 0).getDate();
+  const lastDay = ymd(y,m,daysInMonth);
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  const header = el(`<div class="cal-header">
+    <button class="btn-sm btn-ghost" id="calPrev">◀</button>
+    <div class="cal-title">${monthNames[m]} ${y}</div>
+    <button class="btn-sm btn-ghost" id="calNext">▶</button>
+  </div>`);
+  container.appendChild(header);
+  const grid = el(`<div id="calGrid"></div>`);
+  container.appendChild(grid);
+  const dayList = el(`<div id="calDayList"><div class="spinner"></div></div>`);
+  container.appendChild(dayList);
+
+  $('#calPrev', header).addEventListener('click', ()=>{
+    STATE.calendarMonthIdx--;
+    if(STATE.calendarMonthIdx<0){ STATE.calendarMonthIdx=11; STATE.calendarYear--; }
+    renderScreen();
+  });
+  $('#calNext', header).addEventListener('click', ()=>{
+    STATE.calendarMonthIdx++;
+    if(STATE.calendarMonthIdx>11){ STATE.calendarMonthIdx=0; STATE.calendarYear++; }
+    renderScreen();
+  });
+
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length){ grid.innerHTML=''; dayList.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const unsub = listenScheduleByBatchIds(ids, firstDay, lastDay, items=>{
+      renderCalendarGrid(grid, y, m, items);
+      renderDaySchedule(dayList, items);
+    }, ()=>{ dayList.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+    trackUnsub(unsub);
+  });
+}
+
+function renderCalendarGrid(grid, y, m, items){
+  const datesWithClasses = new Set(items.map(i=>i.date));
+  const firstWeekday = (new Date(y,m,1).getDay()+6)%7; // 0=Mon .. 6=Sun
+  const daysInMonth = new Date(y,m+1,0).getDate();
+  const today = todayYMD();
+
+  let html = `<div class="cal-dow">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<div>${d}</div>`).join('')}</div><div class="cal-days">`;
+  for(let i=0;i<firstWeekday;i++) html += `<div class="cal-day empty"></div>`;
+  for(let d=1; d<=daysInMonth; d++){
+    const dateStr = ymd(y,m,d);
+    const has = datesWithClasses.has(dateStr);
+    const isToday = dateStr===today;
+    const isSelected = dateStr===STATE.calendarSelectedDate;
+    html += `<div class="cal-day${isToday?' cal-today':''}${isSelected?' cal-selected':''}" data-date="${dateStr}">
+      <span>${d}</span>${has?'<span class="cal-dot"></span>':''}
+    </div>`;
+  }
+  html += `</div>`;
+  grid.innerHTML = html;
+  $all('.cal-day[data-date]', grid).forEach(cell=> cell.addEventListener('click', ()=>{
+    STATE.calendarSelectedDate = cell.dataset.date;
+    renderScreen();
+  }));
+}
+
+function renderDaySchedule(box, items){
+  const dayItems = items.filter(i=> i.date === STATE.calendarSelectedDate)
+    .sort((a,b)=> (a.startTime||'').localeCompare(b.startTime||''));
+  const d = new Date(STATE.calendarSelectedDate+'T00:00:00');
+  const label = d.toLocaleDateString('en-GB',{day:'2-digit',month:'long'});
+  box.innerHTML = `<div class="card-title" style="margin:14px 0 8px">${esc(label)}</div>`;
+  if(!dayItems.length){
+    box.appendChild(el(`<div class="empty-state">No classes scheduled.</div>`));
+    return;
+  }
+  dayItems.forEach(c=>{
+    const cancelled = c.status === 'cancelled';
+    const card = el(`<div class="item-card">
+      <div class="item-top"><div class="item-icon">${cancelled?'🚫':'📅'}</div><div class="item-info">
+        <div class="item-title" style="${cancelled?'text-decoration:line-through;opacity:.6':''}">${esc(c.title||'Class')}</div>
+        <div class="item-meta">${esc(c.startTime||'')} – ${esc(c.endTime||'')}${c.topic?(' · '+esc(c.topic)):''}${c.teacher?(' · '+esc(c.teacher)):''}</div>
+        <div class="item-badges">
+          <span class="badge badge-muted">${esc(c.batchName||'')}</span>
+          ${cancelled?'<span class="badge badge-paid">CANCELLED</span>':''}
+          ${(c.rescheduled && !cancelled)?'<span class="badge badge-muted">Rescheduled</span>':''}
+          ${c.classType?`<span class="badge badge-muted">${esc(c.classType)}</span>`:''}
+        </div>
+      </div></div>
+    </div>`);
+    box.appendChild(card);
+  });
 }
 
 function renderClassesTab(container){
@@ -2051,6 +2215,7 @@ function renderAdminShell(){
     else if(STATE.adminTab==='tests') renderAdminTests(content);
     else if(STATE.adminTab==='notes') renderAdminNotes(content);
     else if(STATE.adminTab==='announcements') renderAdminAnnouncements(content);
+    else if(STATE.adminTab==='calendar') renderAdminCalendar(content);
     else if(STATE.adminTab==='requests') renderAdminUpgradeRequests(content);
   }
   return shell;
@@ -2065,6 +2230,7 @@ function openAdminDrawer(){
     { key:'tests', icon:'📝', label:'Tests', onSelect:()=>{ STATE.adminTab='tests'; renderScreen(); } },
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.adminTab='notes'; renderScreen(); } },
     { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.adminTab='announcements'; renderScreen(); } },
+    { key:'calendar', icon:'📅', label:'Calendar', onSelect:()=>{ STATE.adminTab='calendar'; renderScreen(); } },
     { key:'requests', icon:'⭐', label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
@@ -2086,6 +2252,7 @@ function renderAdminHome(container){
       <button class="home-tile" data-t="tests"><span class="ht-icon">📝</span><span class="ht-label">Tests</span></button>
       <button class="home-tile" data-t="notes"><span class="ht-icon">📄</span><span class="ht-label">Notes</span></button>
       <button class="home-tile" data-t="announcements"><span class="ht-icon">📢</span><span class="ht-label">Announcements</span></button>
+      <button class="home-tile" data-t="calendar"><span class="ht-icon">📅</span><span class="ht-label">Calendar</span></button>
       <button class="home-tile" data-t="requests" style="position:relative">
         <span class="ht-icon">⭐</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
@@ -3249,6 +3416,167 @@ function renderAdminAnnouncements(container){
             await db.collection(COL.announcements).doc(a.id).delete();
             toast('Deleted');
             if(editingId===a.id) resetAnnForm();
+          }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
+        }
+      }));
+      listBox.appendChild(card);
+    });
+  }, err=> console.error(err));
+  trackUnsub(unsub);
+}
+
+/* ================================================================
+   ADMIN — Calendar / Class Schedule (Phase F)
+   ----------------------------------------------------------------
+   Same create-doubles-as-edit form pattern as Announcements. Rescheduling
+   isn't a separate flow: editing an existing entry's date/start/end time
+   is what rescheduling IS — the save handler detects the change itself
+   and stamps rescheduled:true + the ORIGINAL date/time (captured once,
+   never overwritten by a later reschedule, so it always points at the
+   true original even after several moves). Cancelling just flips status
+   — the entry is never deleted by it, matching "cancelled classes stay
+   visible, clearly marked" rather than disappearing. A plain list view
+   here rather than a second calendar grid: the grid is a student-facing
+   requirement (section 6), and a sorted list is consistent with every
+   other admin content section already in this app. */
+function renderAdminCalendar(container){
+  container.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title" id="schFormTitle">📅 New class</div>
+      <div class="field"><label>Audience / Batch</label><select id="schBatch"><option value="">Select audience...</option></select></div>
+      <div class="row2">
+        <div class="field"><label>Date</label><input type="date" id="schDate"></div>
+        <div class="field"><label>Class type (optional)</label><input id="schType" placeholder="Regular"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Start time</label><input type="time" id="schStart"></div>
+        <div class="field"><label>End time</label><input type="time" id="schEnd"></div>
+      </div>
+      <div class="field"><label>Title</label><input id="schTitle" placeholder="Organic Chemistry"></div>
+      <div class="row2">
+        <div class="field"><label>Topic (optional)</label><input id="schTopic" placeholder="Alcohols"></div>
+        <div class="field"><label>Teacher (optional)</label><input id="schTeacher" placeholder=""></div>
+      </div>
+      <div class="row2">
+        <button class="btn btn-primary" id="saveSchedule">📅 Add to schedule</button>
+        <button class="btn btn-ghost" id="cancelEditSch" style="display:none">Cancel edit</button>
+      </div>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">All scheduled classes</div>
+    <div id="scheduleAdminList"><div class="spinner"></div></div>
+  </div>`));
+  loadActiveBatchesInto($('#schBatch', container));
+
+  let editingId = null, editingEntry = null;
+  function resetSchForm(){
+    editingId = null; editingEntry = null;
+    $('#schFormTitle', container).textContent = '📅 New class';
+    ['schDate','schType','schStart','schEnd','schTitle','schTopic','schTeacher'].forEach(id=> $('#'+id,container).value='');
+    $('#schBatch', container).value = '';
+    $('#saveSchedule', container).textContent = '📅 Add to schedule';
+    $('#cancelEditSch', container).style.display = 'none';
+  }
+  $('#cancelEditSch', container).addEventListener('click', resetSchForm);
+
+  $('#saveSchedule', container).addEventListener('click', async ()=>{
+    const date = $('#schDate',container).value;
+    const startTime = $('#schStart',container).value;
+    const endTime = $('#schEnd',container).value;
+    const title = $('#schTitle',container).value.trim();
+    const topic = $('#schTopic',container).value.trim();
+    const classType = $('#schType',container).value.trim();
+    const teacher = $('#schTeacher',container).value.trim();
+    const batchSel = $('#schBatch',container);
+    const batchId = batchSel.value;
+    if(!batchId){ toast('Select an audience'); return; }
+    if(!date){ toast('Select a date'); return; }
+    if(!startTime || !endTime){ toast('Enter start and end time'); return; }
+    if(endTime <= startTime){ toast('End time must be after start time'); return; }
+    if(!title){ toast('Enter a title'); return; }
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const btn = $('#saveSchedule',container); btn.disabled = true;
+    try{
+      if(editingId){
+        const payload = { batchId, batchName, date, startTime, endTime, title, topic, classType, teacher, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
+        const dateChanged = date !== editingEntry.date || startTime !== editingEntry.startTime || endTime !== editingEntry.endTime;
+        if(dateChanged){
+          payload.rescheduled = true;
+          if(!editingEntry.rescheduled){
+            // first time this entry has moved — capture the TRUE original,
+            // never overwritten by any later reschedule.
+            payload.originalDate = editingEntry.date;
+            payload.originalStartTime = editingEntry.startTime;
+            payload.originalEndTime = editingEntry.endTime;
+          }
+        }
+        await db.collection(COL.classSchedules).doc(editingId).update(payload);
+        toast('Class updated');
+      } else {
+        await db.collection(COL.classSchedules).add({
+          batchId, batchName, date, startTime, endTime, title, topic, classType, teacher,
+          status: 'scheduled', rescheduled: false,
+          createdBy: CURRENT_USER.uid,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        toast('Class added to schedule');
+      }
+      resetSchForm();
+    }catch(e){
+      console.error(e);
+      toast('Could not save — check your connection.');
+    }
+    btn.disabled = false;
+  });
+
+  const listBox = $('#scheduleAdminList', container);
+  const unsub = db.collection(COL.classSchedules).orderBy('date','desc').onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No classes scheduled yet.</div>'; return; }
+    items.forEach(c=>{
+      const cancelled = c.status === 'cancelled';
+      const card = el(`<div class="item-card">
+        <div class="item-top"><div class="item-icon">${cancelled?'🚫':'📅'}</div><div class="item-info">
+          <div class="item-title" style="${cancelled?'text-decoration:line-through;opacity:.6':''}">${esc(c.title||'Class')}</div>
+          <div class="item-meta">${esc(c.date||'')} · ${esc(c.startTime||'')}–${esc(c.endTime||'')}${c.topic?(' · '+esc(c.topic)):''}</div>
+          <div class="item-badges">
+            <span class="badge badge-muted">${esc(c.batchName||'')}</span>
+            ${cancelled?'<span class="badge badge-paid">Cancelled</span>':'<span class="badge badge-free">Scheduled</span>'}
+            ${c.rescheduled?'<span class="badge badge-muted">Rescheduled</span>':''}
+          </div>
+        </div></div>
+        <div class="item-actions">
+          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${cancelled?'✅ Restore':'🚫 Cancel'}</button>
+          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+        </div>
+      </div>`);
+      $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
+        if(b.dataset.act==='edit'){
+          editingId = c.id; editingEntry = c;
+          $('#schFormTitle', container).textContent = '✏️ Edit class';
+          $('#schBatch', container).value = c.batchId||'';
+          $('#schDate', container).value = c.date||'';
+          $('#schStart', container).value = c.startTime||'';
+          $('#schEnd', container).value = c.endTime||'';
+          $('#schTitle', container).value = c.title||'';
+          $('#schTopic', container).value = c.topic||'';
+          $('#schType', container).value = c.classType||'';
+          $('#schTeacher', container).value = c.teacher||'';
+          $('#saveSchedule', container).textContent = '💾 Update class';
+          $('#cancelEditSch', container).style.display = '';
+        } else if(b.dataset.act==='toggle'){
+          try{
+            await db.collection(COL.classSchedules).doc(c.id).update({ status: cancelled?'scheduled':'cancelled', updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            toast(cancelled ? 'Restored' : 'Class cancelled');
+          }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
+        } else if(b.dataset.act==='del'){
+          if(!confirm('Delete this class from the schedule? Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.')) return;
+          try{
+            await db.collection(COL.classSchedules).doc(c.id).delete();
+            toast('Deleted');
+            if(editingId===c.id) resetSchForm();
           }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
         }
       }));
