@@ -1210,8 +1210,8 @@ function renderDashboardTab(container){
   if(p.membership !== 'paid'){
     container.appendChild(el(`
       <div class="card" style="border-color:var(--accent)">
-        <div class="card-title">⭐ Go Paid</div>
-        <div style="font-size:12px;color:var(--text-muted)">Unlock paid-only classes, notes and tests. Ask your teacher to upgrade your account.</div>
+        <div class="card-title">⭐ Paid membership</div>
+        <div style="font-size:12px;color:var(--text-muted)">Pay your teacher directly (cash/UPI) to become a paid member. This doesn't change which classes or materials you can see — everything in your batch is already available to you.</div>
       </div>
     `));
   }
@@ -1377,18 +1377,12 @@ async function syncAndGetMyBatchIds(){
    unsubscribe function that stops all of them; register it with
    trackUnsub() same as any other listener.
 
-   isPaid decides whether paid-only content is even included: a free
-   student's query always adds the freeFilter constraint (e.g.
-   access=='free', or paidOnly==false for notes — the two collections use
-   different field names for the same idea), so paid documents are never
-   fetched at all, not just hidden in the UI. The matching firestore.rules
-   content rule independently checks the caller's own membership too, so
-   tampering with this client-side flag to omit the filter doesn't help:
-   the rule would reject the whole query unless the caller is genuinely a
-   paid student server-side. Pass freeFilter as {field, value} — the
-   field/value that marks an item as free (e.g. {field:'access',
-   value:'free'} or {field:'paidOnly', value:false}). */
-function listenContentByBatchIds(collectionName, batchIds, isPaid, freeFilter, onChange, onError){
+   extraWhere is an optional {field, value} always applied on top of the
+   batchId filter (e.g. {field:'active', value:true} for announcements) —
+   whatever the matching firestore.rules rule checks beyond batch
+   authorization, the query must constrain the same way, or Firestore
+   rejects the whole query as unprovable (see firestore.rules' comments). */
+function listenContentByBatchIds(collectionName, batchIds, extraWhere, onChange, onError){
   if(!batchIds.length){ onChange([]); return ()=>{}; }
   const chunks = [];
   for(let i=0;i<batchIds.length;i+=30) chunks.push(batchIds.slice(i,i+30));
@@ -1402,7 +1396,7 @@ function listenContentByBatchIds(collectionName, batchIds, isPaid, freeFilter, o
   }
   const unsubs = chunks.map((chunk, i) => {
     let q = db.collection(collectionName).where('batchId','in',chunk);
-    if(!isPaid) q = q.where(freeFilter.field,'==',freeFilter.value);
+    if(extraWhere) q = q.where(extraWhere.field,'==',extraWhere.value);
     return q.onSnapshot(snap=>{
       chunkResults[i] = []; snap.forEach(d=> chunkResults[i].push({id:d.id, ...d.data()}));
       emit();
@@ -1576,13 +1570,12 @@ function renderClassesTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const isPaid = CURRENT_PROFILE.membership === 'paid';
     if(STATE.classesSubTab === 'recorded'){
-      const unsub = listenContentByBatchIds(COL.videos, ids, isPaid, {field:'access',value:'free'}, items=> renderVideoList(listBox, items),
+      const unsub = listenContentByBatchIds(COL.videos, ids, null, items=> renderVideoList(listBox, items),
         ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
       trackUnsub(unsub);
     } else {
-      const unsub = listenContentByBatchIds(COL.liveClasses, ids, isPaid, {field:'access',value:'free'}, items=>{
+      const unsub = listenContentByBatchIds(COL.liveClasses, ids, null, items=>{
         items.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
         renderLiveList(listBox, items);
       }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -1595,22 +1588,17 @@ function renderVideoList(box, items){
   box.innerHTML = '';
   if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">🎬</div>No recorded classes yet.</div>`)); return; }
   items.forEach(v=>{
-    const locked = v.access==='paid' && CURRENT_PROFILE.membership!=='paid';
     const card = el(`
-      <div class="item-card" style="${locked?'opacity:.55':''}">
+      <div class="item-card">
         <div class="item-top">
-          <div class="item-icon">${locked?'🔒':'▶️'}</div>
+          <div class="item-icon">▶️</div>
           <div class="item-info">
             <div class="item-title">${esc(v.title||'Untitled class')}</div>
             <div class="item-meta">${esc(v.subject||'')}${v.classNo?(' · Class '+esc(v.classNo)):''}${v.chapter?(' · '+esc(v.chapter)):''}${v.duration?(' · '+esc(v.duration)):''}</div>
-            <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'⭐ Paid':'Free'}</span></div>
           </div>
         </div>
       </div>`);
-    card.addEventListener('click', ()=>{
-      if(locked){ toast('This class is for paid students. Ask your teacher to upgrade you.'); return; }
-      openVideoPlayer(v);
-    });
+    card.addEventListener('click', ()=> openVideoPlayer(v));
     box.appendChild(card);
   });
 }
@@ -1622,7 +1610,6 @@ function renderLiveList(box, items){
     const statusBadge = lc.status==='live' ? `<span class="badge badge-live">🔴 Live now</span>`
       : lc.status==='ended' ? `<span class="badge badge-muted">Ended</span>`
       : `<span class="badge badge-accent">📅 Upcoming</span>`;
-    const locked = lc.access==='paid' && CURRENT_PROFILE.membership!=='paid';
     const card = el(`
       <div class="item-card">
         <div class="item-top">
@@ -1633,10 +1620,9 @@ function renderLiveList(box, items){
             <div class="item-badges">${statusBadge}</div>
           </div>
         </div>
-        ${lc.status==='live' && !locked ? `<button class="btn btn-danger" style="margin-top:10px">🎥 Join Live Class Now</button>` : ''}
-        ${lc.status==='live' && locked ? `<div style="margin-top:10px;font-size:11px;color:var(--text-dim)">🔒 Paid students only</div>` : ''}
+        ${lc.status==='live' ? `<button class="btn btn-danger" style="margin-top:10px">🎥 Join Live Class Now</button>` : ''}
       </div>`);
-    if(lc.status==='live' && !locked){
+    if(lc.status==='live'){
       $('button',card).addEventListener('click', ()=>{
         if(lc.meetLink) window.open(lc.meetLink,'_blank');
         else toast('Meet link not set yet.');
@@ -1700,7 +1686,7 @@ function renderTestsTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const unsub = listenContentByBatchIds(COL.tests, ids, CURRENT_PROFILE.membership === 'paid', {field:'access',value:'free'}, items=>{
+    const unsub = listenContentByBatchIds(COL.tests, ids, null, items=>{
       allTests = items;
       applyFilter();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -1717,28 +1703,23 @@ function renderTestList(box, tests, myResults){
   box.innerHTML='';
   if(!tests.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📝</div>No tests here yet.</div>`)); return; }
   tests.forEach(t=>{
-    const locked = t.access==='paid' && CURRENT_PROFILE.membership!=='paid';
     const r = myResults[t.id];
     const typeIcon = t.type==='live' ? '🔴' : t.type==='selfpaced' ? '⏱' : '📚';
     const card = el(`
-      <div class="item-card" style="${locked?'opacity:.55':''}">
+      <div class="item-card">
         <div class="item-top">
-          <div class="item-icon">${locked?'🔒':typeIcon}</div>
+          <div class="item-icon">${typeIcon}</div>
           <div class="item-info">
             <div class="item-title">${esc(t.title||'Untitled test')}</div>
             <div class="item-meta">${esc(t.subject||'')}${t.duration?(' · '+t.duration+' min'):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
             <div class="item-badges">
               <span class="badge badge-accent">${typeIcon} ${t.type==='live'?'Live':t.type==='selfpaced'?'Self-paced':'Practice'}</span>
-              ${t.access==='paid'?'<span class="badge badge-paid">⭐ Paid</span>':''}
               ${r?`<span class="badge badge-muted">${r.score}/${r.total}</span>`:''}
             </div>
           </div>
         </div>
       </div>`);
-    card.addEventListener('click', ()=>{
-      if(locked){ toast('This test is for paid students.'); return; }
-      openTestPlayer(t);
-    });
+    card.addEventListener('click', ()=> openTestPlayer(t));
     box.appendChild(card);
   });
 }
@@ -1805,7 +1786,7 @@ function renderNotesTab(container){
   });
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const unsub = listenContentByBatchIds(COL.notes, ids, CURRENT_PROFILE.membership === 'paid', {field:'paidOnly',value:false}, items=>{
+    const unsub = listenContentByBatchIds(COL.notes, ids, null, items=>{
       allNotes = items;
       apply();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -1821,11 +1802,10 @@ function renderNotesList(box, items){
   box.innerHTML='';
   if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📄</div>No files here yet.</div>`)); return; }
   items.forEach(n=>{
-    const locked = n.paidOnly && CURRENT_PROFILE.membership!=='paid';
     const card = el(`
-      <div class="item-card" style="${locked?'opacity:.55':''}">
+      <div class="item-card">
         <div class="item-top">
-          <div class="item-icon">${locked?'🔒':n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div>
+          <div class="item-icon">${n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div>
           <div class="item-info">
             <div class="item-title">${esc(n.title||'Untitled file')}</div>
             <div class="item-meta">${esc(n.subject||'')}${n.size?(' · '+n.size):''}</div>
@@ -1833,13 +1813,11 @@ function renderNotesList(box, items){
               <span class="badge ${n.fileType==='assignment'?'badge-accent':n.downloadable?'badge-free':'badge-paid'}">
                 ${n.fileType==='assignment'?'Assignment':n.downloadable?'Downloadable':'View-only'}
               </span>
-              ${n.paidOnly?'<span class="badge badge-paid">⭐ Paid</span>':''}
             </div>
           </div>
         </div>
       </div>`);
     card.addEventListener('click', ()=>{
-      if(locked){ toast('This file is for paid students.'); return; }
       if(!n.driveId){ toast('File link not set yet.'); return; }
       if(n.downloadable){ window.open(n.driveLink || ('https://drive.google.com/file/d/'+n.driveId+'/view'), '_blank'); }
       else { openPdfViewer(n); }
@@ -1912,8 +1890,8 @@ function renderUpgradeArea(box){
     } else {
       const card = el(`
         <div class="upgrade-banner">
-          <div style="font-size:13px;font-weight:600;margin-bottom:8px">⭐ Want paid access?</div>
-          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:10px">Pay your teacher directly (cash/UPI), then request an upgrade — your teacher approves it from their side.</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px">⭐ Become a paid member?</div>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:10px">Pay your teacher directly (cash/UPI), then request the upgrade — your teacher approves it from their side. Note: this doesn't unlock extra classes or materials — everything in your batch is already available to you.</div>
           <button class="btn btn-primary" id="reqUpgradeBtn" style="width:auto;padding:9px 18px;margin:0 auto">Request paid upgrade</button>
         </div>
       `);
@@ -1960,14 +1938,14 @@ function renderAnnouncementsTab(container){
   container.appendChild(listBox);
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const unsub = listenContentByBatchIds(COL.announcements, ids, true, null, items=>{
+    const unsub = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
       items.sort((a,b)=>{
         const at = (a.createdAt && a.createdAt.toDate) ? a.createdAt.toDate().getTime() : 0;
         const bt = (b.createdAt && b.createdAt.toDate) ? b.createdAt.toDate().getTime() : 0;
         return bt - at; // newest first
       });
       renderAnnouncementsList(listBox, items);
-    }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; }, {field:'active', value:true});
+    }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
     trackUnsub(unsub);
   });
 }
@@ -2922,10 +2900,7 @@ function drawRecordedForm(body){
         <div class="field"><label>Chapter</label><input id="vChapter" placeholder="Electric Current"></div>
         <div class="field"><label>Class no.</label><input id="vClassNo" placeholder="27"></div>
       </div>
-      <div class="row2">
-        <div class="field"><label>Duration</label><input id="vDuration" placeholder="48:32"></div>
-        <div class="field"><label>Access</label><select id="vAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
-      </div>
+      <div class="field"><label>Duration</label><input id="vDuration" placeholder="48:32"></div>
       <button class="btn btn-primary" id="saveVideo">💾 Save to Firebase</button>
     </div>
     <div class="card-title" style="margin:14px 0 8px">Uploaded videos</div>
@@ -2944,7 +2919,7 @@ function drawRecordedForm(body){
       ytId: ytIdFromUrl(url), title,
       subject: $('#vSubject',body).value.trim(), batchId, batchName,
       chapter: $('#vChapter',body).value.trim(), classNo: $('#vClassNo',body).value.trim(),
-      duration: $('#vDuration',body).value.trim(), access: $('#vAccess',body).value,
+      duration: $('#vDuration',body).value.trim(),
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('Saved to Firebase!');
@@ -2986,7 +2961,6 @@ function drawLiveForm(body){
         <div class="field"><label>Date</label><input type="date" id="lDate"></div>
         <div class="field"><label>Time</label><input type="time" id="lTime" value="17:00"></div>
       </div>
-      <div class="field"><label>Access</label><select id="lAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
       <button class="btn btn-primary" id="saveLive">💾 Save to Firebase</button>
     </div>
     <div class="card-title" style="margin:14px 0 8px">Scheduled classes</div>
@@ -3003,7 +2977,7 @@ function drawLiveForm(body){
     const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.liveClasses).add({
       meetLink: url, title, subject: $('#lSubject',body).value.trim(), batchId, batchName,
-      date: $('#lDate',body).value, time: $('#lTime',body).value, access: $('#lAccess',body).value,
+      date: $('#lDate',body).value, time: $('#lTime',body).value,
       status: 'upcoming', createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('Saved to Firebase!');
@@ -3121,7 +3095,6 @@ function drawManualBuilder(body){
         <div class="field"><label>Correct marks</label><input type="number" id="mCorrect" value="4"></div>
         <div class="field"><label>Wrong marks</label><input type="number" id="mWrong" value="-1"></div>
       </div>
-      <div class="field"><label>Access</label><select id="mAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
     </div>
     <div class="card">
       <div class="card-title">❓ Questions <span id="qCountLbl" style="color:var(--text-dim);font-weight:400;font-size:11px">(0 added)</span></div>
@@ -3175,7 +3148,7 @@ function drawManualBuilder(body){
     const html = buildTestHTML(meta, questions);
     await db.collection(COL.tests).add({
       title, subject: $('#mSubject',body).value.trim(), batchId, batchName,
-      type: $('#mType',body).value, access: $('#mAccess',body).value,
+      type: $('#mType',body).value,
       duration: meta.duration, questionCount: questions.length, htmlContent: html, source: 'manual',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
@@ -3197,10 +3170,7 @@ function drawPasteForm(body){
         <div class="field"><label>Subject</label><input id="pSubject" placeholder="Physics"></div>
         <div class="field"><label>Batch</label><select id="pBatch"><option value="">Select batch...</option></select></div>
       </div>
-      <div class="row2">
-        <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice</option></select></div>
-        <div class="field"><label>Access</label><select id="pAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
-      </div>
+      <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice</option></select></div>
       <div class="field"><label>Paste full HTML code</label><textarea id="pHtml" style="min-height:130px;font-family:monospace;font-size:11px"></textarea></div>
       <button class="btn btn-primary" id="publishPaste">🚀 Publish to Firebase</button>
     </div>`));
@@ -3215,7 +3185,7 @@ function drawPasteForm(body){
     const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.tests).add({
       title, subject: $('#pSubject',body).value.trim(), batchId, batchName,
-      type: $('#pType',body).value, access: $('#pAccess',body).value, htmlContent: html, source: 'pasted',
+      type: $('#pType',body).value, htmlContent: html, source: 'pasted',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     toast('✅ Published to Firebase!');
@@ -3238,10 +3208,7 @@ function renderAdminNotes(container){
         <div class="field"><label>Subject</label><input id="nSubject" placeholder="Physics"></div>
         <div class="field"><label>Batch</label><select id="nBatch"><option value="">Select batch...</option></select></div>
       </div>
-      <div class="row2">
-        <div class="field"><label>Type</label><select id="nType"><option value="study">Study material</option><option value="assignment">Assignment</option></select></div>
-        <div class="field"><label>Access</label><select id="nAccess"><option value="free">Free</option><option value="paid">Paid only</option></select></div>
-      </div>
+      <div class="field"><label>Type</label><select id="nType"><option value="study">Study material</option><option value="assignment">Assignment</option></select></div>
       <div class="field"><label>Allow download?</label><select id="nDownload"><option value="yes">Yes — downloadable</option><option value="no">No — view only</option></select></div>
       <div class="field"><label>Google Drive share link</label><input id="nDriveLink" placeholder="https://drive.google.com/file/d/xxxxxxxx/view"></div>
       <button class="btn btn-primary" id="uploadNote">💾 Save to Firebase</button>
@@ -3264,7 +3231,7 @@ function renderAdminNotes(container){
     try{
       await db.collection(COL.notes).add({
         title, subject: $('#nSubject',container).value.trim(), batchId, batchName,
-        fileType: $('#nType',container).value, paidOnly: $('#nAccess',container).value === 'paid',
+        fileType: $('#nType',container).value,
         downloadable: $('#nDownload',container).value === 'yes',
         driveId, driveLink: link,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
