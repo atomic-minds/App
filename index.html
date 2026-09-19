@@ -1160,7 +1160,6 @@ function openStudentDrawer(){
     { key:'calendar', icon:'📅', label:'Calendar', onSelect:()=>{ STATE.studentTab='calendar'; renderScreen(); } },
     { key:'profile', icon:'👤', label:'Profile & Settings', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
     { divider:true },
-    { key:'membership', icon: p.membership==='paid' ? '⭐' : '🔓', label: p.membership==='paid' ? 'Paid member' : 'Request paid upgrade', onSelect:()=>{ STATE.studentTab='profile'; renderScreen(); } },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
   ], STATE.studentTab);
 }
@@ -1172,7 +1171,6 @@ function renderDashboardTab(container){
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:17px;font-weight:700">Hi, ${esc(first)} 👋</div>
-        ${p.membership==='paid' ? '<span class="badge badge-paid">⭐ PAID</span>' : '<span class="badge badge-free">FREE</span>'}
       </div>
       <div id="dashBatchLine" style="font-size:12px;color:var(--text-muted)">Loading your batch…</div>
     </div>
@@ -1207,14 +1205,6 @@ function renderDashboardTab(container){
     renderScreen();
   });
   container.appendChild(links);
-  if(p.membership !== 'paid'){
-    container.appendChild(el(`
-      <div class="card" style="border-color:var(--accent)">
-        <div class="card-title">⭐ Paid membership</div>
-        <div style="font-size:12px;color:var(--text-muted)">Pay your teacher directly (cash/UPI) to become a paid member. This doesn't change which classes or materials you can see — everything in your batch is already available to you.</div>
-      </div>
-    `));
-  }
 }
 
 /* Shown on the Dashboard whenever the student has no active batch.
@@ -1494,7 +1484,28 @@ function renderCalendarTab(container){
     const unsub = listenScheduleByBatchIds(ids, firstDay, lastDay, items=>{
       renderCalendarGrid(grid, y, m, items);
       renderDaySchedule(dayList, items);
-    }, ()=>{ dayList.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+    }, (err)=>{
+      // Diagnostic-only change (Phase F calendar bug investigation): surface
+      // the REAL Firestore error instead of a blanket "check your connection"
+      // message, so the failure mode is visible without opening devtools.
+      // The full error object is already console.error'd inside
+      // listenScheduleByBatchIds() above.
+      const code = err && err.code;
+      let msg = 'Could not load — check your connection.';
+      if(code === 'failed-precondition'){
+        // This is what Firestore throws when a query needs a composite
+        // index that hasn't been created yet. This query (batchId "in" +
+        // a date range) needs one on classSchedules: batchId, date — see
+        // the comment above listenScheduleByBatchIds(). Open the browser
+        // console: Firestore prints a direct "create it here" link with
+        // this exact error.
+        msg = 'Calendar setup incomplete — a database index is missing. Open the browser console for a link to create it.';
+      } else if(code === 'permission-denied'){
+        msg = 'Could not load your schedule — your batch access may be out of date. Try logging out and back in.';
+      }
+      grid.innerHTML = '';
+      dayList.innerHTML = `<div class="empty-state">${esc(msg)}</div>`;
+    });
     trackUnsub(unsub);
   });
 }
@@ -1874,52 +1885,6 @@ function openPdfViewer(n){
   $('#closePdf', overlay).addEventListener('click', ()=> overlay.remove());
 }
 
-/* Paid access always requires an explicit admin approval — a student can
-   only *request* an upgrade here; membership only changes once an admin
-   approves it from the Upgrade Requests screen. */
-function renderUpgradeArea(box){
-  const p = CURRENT_PROFILE;
-  if(p.membership === 'paid'){ box.innerHTML=''; return; }
-  box.innerHTML = '<div class="spinner"></div>';
-  db.collection(COL.upgradeRequests).where('studentId','==',CURRENT_USER.uid).get().then(snap=>{
-    let pending = null;
-    snap.forEach(d=>{ const r=d.data(); if(r.status==='pending') pending = r; });
-    box.innerHTML = '';
-    if(pending){
-      box.appendChild(el(`<div class="upgrade-pending">⏳ Upgrade request sent — waiting for your teacher to approve.</div>`));
-    } else {
-      const card = el(`
-        <div class="upgrade-banner">
-          <div style="font-size:13px;font-weight:600;margin-bottom:8px">⭐ Become a paid member?</div>
-          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:10px">Pay your teacher directly (cash/UPI), then request the upgrade — your teacher approves it from their side. Note: this doesn't unlock extra classes or materials — everything in your batch is already available to you.</div>
-          <button class="btn btn-primary" id="reqUpgradeBtn" style="width:auto;padding:9px 18px;margin:0 auto">Request paid upgrade</button>
-        </div>
-      `);
-      $('#reqUpgradeBtn', card).addEventListener('click', ()=> requestUpgrade(box));
-      box.appendChild(card);
-    }
-  }).catch(err=>{
-    console.error(err);
-    box.innerHTML = '';
-  });
-}
-
-async function requestUpgrade(box){
-  try{
-    await db.collection(COL.upgradeRequests).add({
-      studentId: CURRENT_USER.uid,
-      studentName: CURRENT_PROFILE.fullName || '',
-      status: 'pending',
-      requestedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    toast('Request sent — your teacher will review it.');
-    renderUpgradeArea(box);
-  }catch(e){
-    console.error(e);
-    toast('Could not send request — check your connection.');
-  }
-}
-
 /* ================================================================
    ANNOUNCEMENTS (Phase E)
    ----------------------------------------------------------------
@@ -1991,11 +1956,8 @@ function renderProfileTab(container){
       <div style="width:56px;height:56px;border-radius:50%;background:var(--accent-bright);display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;color:#150a1f;margin:0 auto 10px">${esc(initials)}</div>
       <div style="font-size:17px;font-weight:700">${esc(p.fullName)}</div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:2px">${esc(p.email)}</div>
-      <div style="margin-top:8px">${p.membership==='paid'?'<span class="badge badge-paid">⭐ PAID</span>':'<span class="badge badge-free">FREE</span>'}</div>
     </div>
   `));
-  container.appendChild(el(`<div id="upgradeArea"></div>`));
-  renderUpgradeArea($('#upgradeArea', container));
   container.appendChild(el(`
     <div class="card">
       <div class="card-title">👤 Your details</div>
@@ -2209,7 +2171,7 @@ function openAdminDrawer(){
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.adminTab='notes'; renderScreen(); } },
     { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.adminTab='announcements'; renderScreen(); } },
     { key:'calendar', icon:'📅', label:'Calendar', onSelect:()=>{ STATE.adminTab='calendar'; renderScreen(); } },
-    { key:'requests', icon:'⭐', label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
+    { key:'requests', icon:'📚', label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
   ], STATE.adminTab);
@@ -2232,7 +2194,7 @@ function renderAdminHome(container){
       <button class="home-tile" data-t="announcements"><span class="ht-icon">📢</span><span class="ht-label">Announcements</span></button>
       <button class="home-tile" data-t="calendar"><span class="ht-icon">📅</span><span class="ht-label">Calendar</span></button>
       <button class="home-tile" data-t="requests" style="position:relative">
-        <span class="ht-icon">⭐</span><span class="ht-label">Requests</span>
+        <span class="ht-icon">📚</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
       </button>
     </div>
@@ -2243,80 +2205,25 @@ function renderAdminHome(container){
     renderScreen();
   });
   container.appendChild(grid);
-  let paidPending = 0, batchPending = 0;
+  let batchPending = 0;
   const badge = $('#reqBadge', grid);
   function refreshBadge(){
-    const n = paidPending + batchPending;
-    if(badge){ badge.style.display = n>0 ? 'block' : 'none'; badge.textContent = n; }
+    if(badge){ badge.style.display = batchPending>0 ? 'block' : 'none'; badge.textContent = batchPending; }
   }
-  const unsub1 = db.collection(COL.upgradeRequests).where('status','==','pending').onSnapshot(snap=>{
-    paidPending = 0; snap.forEach(()=>paidPending++); refreshBadge();
-  });
   const unsub2 = db.collection(COL.batchJoinRequests).where('status','==','pending').onSnapshot(snap=>{
     batchPending = 0; snap.forEach(()=>batchPending++); refreshBadge();
   });
-  trackUnsub(unsub1);
   trackUnsub(unsub2);
 }
 
+/* Batch-join requests only now — paid-upgrade requests were removed:
+   approved batch enrollment already means the student paid the teacher
+   directly and was let in, so there was never a separate "paid" state
+   left to track once membership stopped gating content (Phase F.5). */
 function renderAdminUpgradeRequests(container){
-  const tabs = el(`<div class="tab-filter"><button data-s="paid">⭐ Paid Upgrades</button><button data-s="batch">📚 Batch Joins</button></div>`);
-  container.appendChild(tabs);
-  const body = el(`<div></div>`);
-  container.appendChild(body);
-  let sub = 'paid';
-  $all('button',tabs).forEach(b=> b.classList.toggle('active', b.dataset.s===sub));
-  tabs.addEventListener('click', e=>{
-    const b=e.target.closest('button'); if(!b) return;
-    sub = b.dataset.s;
-    $all('button',tabs).forEach(x=>x.classList.toggle('active',x===b));
-    draw();
-  });
-  function draw(){ body.innerHTML=''; if(sub==='paid') drawPaidUpgradeRequests(body); else drawBatchJoinRequests(body); }
-  draw();
+  drawBatchJoinRequests(container);
 }
 
-function drawPaidUpgradeRequests(container){
-  const listBox = el(`<div><div class="spinner"></div></div>`);
-  container.appendChild(listBox);
-  const unsub = db.collection(COL.upgradeRequests).onSnapshot(snap=>{
-    const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
-    items.sort((a,b)=> (a.status==='pending'?0:1) - (b.status==='pending'?0:1));
-    listBox.innerHTML = '';
-    if(!items.length){ listBox.appendChild(el(`<div class="empty-state"><div class="icon">⭐</div>No upgrade requests yet.</div>`)); return; }
-    items.forEach(r=>{
-      const badge = r.status==='pending' ? '<span class="badge badge-accent">⏳ Pending</span>'
-        : r.status==='approved' ? '<span class="badge badge-free">✅ Approved</span>'
-        : '<span class="badge badge-muted">✕ Rejected</span>';
-      const card = el(`<div class="item-card">
-        <div class="item-top">
-          <div class="item-icon">${r.status==='pending'?'⏳':r.status==='approved'?'✅':'✕'}</div>
-          <div class="item-info">
-            <div class="item-title">${esc(r.studentName||'Student')}</div>
-            <div class="item-meta">Requested: ${fmtDate(r.requestedAt)}</div>
-            <div class="item-badges">${badge}</div>
-          </div>
-        </div>
-        ${r.status==='pending' ? `<div class="item-actions">
-          <button class="btn-sm btn-success" data-act="approve">✅ Approve</button>
-          <button class="btn-sm btn-danger" data-act="reject">✕ Reject</button>
-        </div>` : ''}
-      </div>`);
-      $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
-        if(b.dataset.act === 'approve'){
-          await db.collection(COL.upgradeRequests).doc(r.id).update({ status:'approved' });
-          await db.collection(COL.students).doc(r.studentId).update({ membership:'paid' });
-          toast('Approved — student is now Paid');
-        } else if(b.dataset.act === 'reject'){
-          await db.collection(COL.upgradeRequests).doc(r.id).update({ status:'rejected' });
-          toast('Request rejected');
-        }
-      }));
-      listBox.appendChild(card);
-    });
-  });
-  trackUnsub(unsub);
-}
 
 function drawBatchJoinRequests(container){
   const listBox = el(`<div><div class="spinner"></div></div>`);
@@ -2668,7 +2575,6 @@ function renderAdminStudents(container){
               <div class="item-title">${esc(s.fullName)}</div>
               <div class="item-meta">${esc(s.phone||'')}</div>
               <div class="item-badges">
-                <span class="badge ${s.membership==='paid'?'badge-paid':'badge-free'}">${s.membership==='paid'?'⭐ Paid':'Free'}</span>
                 <span class="badge ${n>0?'badge-accent':'badge-muted'}">📚 ${n>0?(n+' batch'+(n>1?'es':'')):'No batch'}</span>
                 ${s.active===false?`<span class="badge badge-muted" ${s.deactivationReason?`title="${esc(s.deactivationReason)}"`:''}>Deactivated</span>`:''}
               </div>
@@ -2698,14 +2604,6 @@ function openStudentDetail(s){
         <button class="btn btn-ghost" id="resetDevice">🔄 Reset device</button>
       </div>
       ${s.active===false && s.deactivationReason ? `<div style="background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);font-size:12px;padding:8px 10px;border-radius:8px;margin-top:10px"><b>Reason:</b> ${esc(s.deactivationReason)}</div>` : ''}
-    </div>
-    <div class="card">
-      <div class="card-title">⭐ Membership</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <b style="color:${s.membership==='paid'?'var(--warning)':'var(--success)'}">${(s.membership||'free').toUpperCase()}</b></div>
-      <div class="row2">
-        <button class="btn btn-success" id="setFree">Set Free</button>
-        <button class="btn" style="background:var(--warning-bg);color:var(--warning);border:1px solid var(--warning-brd)" id="setPaid">Set Paid</button>
-      </div>
     </div>
     <div class="card">
       <div class="card-title">📚 Batches</div>
@@ -2761,14 +2659,6 @@ function openStudentDetail(s){
       sessionStartedAt: null
     });
     toast('Device reset — student can log in on a new device now.');
-  });
-  $('#setFree', overlay).addEventListener('click', async ()=>{
-    await db.collection(COL.students).doc(s.id).update({ membership:'free' });
-    toast('Set to Free'); if(enrollUnsub) enrollUnsub(); overlay.remove();
-  });
-  $('#setPaid', overlay).addEventListener('click', async ()=>{
-    await db.collection(COL.students).doc(s.id).update({ membership:'paid' });
-    toast('Set to Paid'); if(enrollUnsub) enrollUnsub(); overlay.remove();
   });
 
   // ---- Batches card: live list of this student's enrollments + search-to-enroll ----
