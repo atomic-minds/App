@@ -8,13 +8,25 @@
 // resilience. Firebase, Firestore's realtime channel, Google Drive,
 // YouTube, and MathJax's CDN are never touched by this file at all.
 
-const CACHE_NAME = 'atomic-minds-v4'; 
+const CACHE_NAME = 'atomic-minds-v5'; // bumped to match this file's own versioning convention
 const STATIC_ASSETS = ['./manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(STATIC_ASSETS))
+      .then((cache) => Promise.all(
+        // PHASE H FIX: cache.addAll() is all-or-nothing — if even ONE of
+        // these URLs 404s or fails to fetch, the whole install event
+        // rejects, and a service worker that fails to install is
+        // discarded entirely (never reaches "active"). That would make
+        // navigator.serviceWorker.ready — which Phase H's notification
+        // display now depends on — hang forever with no active worker to
+        // resolve to. Caching each asset independently means one missing
+        // icon can no longer block the whole worker from installing.
+        STATIC_ASSETS.map((url) => cache.add(url).catch((err) => {
+          console.warn('[SW] could not cache', url, err);
+        }))
+      ))
       .then(() => self.skipWaiting())
   );
 });
@@ -24,7 +36,11 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((keys) => Promise.all(keys.map((k) => caches.delete(k)))) // wipe every old cache, no exceptions
       .then(() => caches.open(CACHE_NAME))
-      .then((cache) => cache.addAll(STATIC_ASSETS))
+      .then((cache) => Promise.all( // same per-asset tolerance as install, see comment there
+        STATIC_ASSETS.map((url) => cache.add(url).catch((err) => {
+          console.warn('[SW] could not cache', url, err);
+        }))
+      ))
       .then(() => self.clients.claim())
   );
 });
