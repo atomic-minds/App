@@ -1009,6 +1009,7 @@ async function doLogin(email, password){
     CURRENT_PROFILE = data;
     STATE.screen = 'student';
     renderScreen();
+    startAnnouncementNotifications();
   } finally {
     LOGIN_IN_PROGRESS = false;
   }
@@ -1032,7 +1033,104 @@ async function doLogout(){
   }
   CURRENT_SESSION_ID = null;
   setLocalSessionId(null);
+  stopAnnouncementNotifications();
   auth.signOut();
+}
+
+/* ================================================================
+   BROWSER NOTIFICATIONS (Phase H)
+   ----------------------------------------------------------------
+   Foreground-only, Firestore-listener-driven browser notifications.
+   No FCM, no push server, no service worker involved — deliberately:
+   this only ever fires while the TMS tab is open and this listener is
+   live (same lifetime as every other real-time feature in this app),
+   so a plain page-level Notification works for both showing and
+   click-handling (its own onclick just focuses this window — see
+   showAnnouncementNotification()). This app has no URL router, so
+   "focus the TMS" is the full extent of the click destination, which
+   is explicitly an acceptable outcome for a single-page app like this
+   one. (service-worker.js itself was not part of this change — see
+   the phase report for why extending it wasn't necessary here.)
+
+   Lifecycle: started once per login (doLogin() and the resumed-session
+   branches of onAuthStateChanged() below both call
+   startAnnouncementNotifications(), which is idempotent), stopped on
+   doLogout() and on the top-level "signed out" branch of
+   onAuthStateChanged() — so it also stops for every OTHER sign-out
+   path (deactivated, device-locked, deleted student), without having
+   to duplicate the stop call in each of those branches individually.
+   Deliberately NOT registered via trackUnsub()/clearUnsubs(): those
+   are torn down and rebuilt on every single tab switch (see
+   renderScreen()), which would otherwise silently kill this listener
+   the moment a student opened, say, the Classes tab.
+   ================================================================ */
+let NOTIF_UNSUB = null;
+
+function notificationSupport(){ return 'Notification' in window; }
+
+/* Only ever called from the explicit "Enable Notifications" button in
+   Settings (Part C) — never on page load / login, so a student is
+   never prompted just for opening the app. Never re-prompts once
+   denied — the browser wouldn't show a popup for that anyway, but this
+   also skips the pointless call entirely and just reports the state. */
+async function requestNotificationPermission(){
+  if(!notificationSupport()) return 'unsupported';
+  if(Notification.permission === 'granted') return 'granted';
+  if(Notification.permission === 'denied') return 'denied';
+  try{ return await Notification.requestPermission(); }
+  catch(e){ console.error('[notifications] permission request failed:', e); return Notification.permission; }
+}
+
+/* Shows one native browser notification for a newly-received
+   announcement — never for the initial/already-seen backlog, see
+   startAnnouncementNotifications(). Suppressed while the tab is the
+   one the student is actively looking at (Part J): the in-app
+   announcement UI already covers that case, so a browser notification
+   on top would just be a redundant duplicate, not a missed one. */
+function showAnnouncementNotification(a){
+  if(!notificationSupport() || Notification.permission !== 'granted') return;
+  if(document.visibilityState === 'visible') return;
+  try{
+    const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
+    const notif = new Notification(a.title || 'Atomic Minds', {
+      body,
+      tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
+    });
+    notif.onclick = ()=>{ window.focus(); notif.close(); };
+  }catch(e){ console.error('[notifications] could not show notification:', e); }
+}
+
+/* Idempotent — safe to call from both doLogin() and a resumed session
+   without double-attaching (NOTIF_UNSUB already set = already running).
+   Runs regardless of current Notification.permission: the listener
+   itself is just the same Firestore read every other tab already does,
+   and showAnnouncementNotification() is what actually gates on
+   permission — kept this way so a student who enables notifications
+   mid-session (Settings tab) starts getting them immediately, with
+   nothing here needing to notice that change or restart anything. */
+function startAnnouncementNotifications(){
+  if(NOTIF_UNSUB) return;
+  let seenIds = null; // null = first snapshot not processed yet
+  syncAndGetMyBatchIds().then(ids=>{
+    if(!ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
+    NOTIF_UNSUB = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
+      if(seenIds === null){
+        // First delivery after (re)attaching is the existing backlog, not
+        // "new" — mark it all seen and never notify for it (Part G).
+        seenIds = new Set(items.map(a=>a.id));
+        return;
+      }
+      items.forEach(a=>{
+        if(seenIds.has(a.id)) return; // already-known doc re-delivered — reconnect/metadata-only change/etc. (Part F)
+        seenIds.add(a.id);
+        showAnnouncementNotification(a);
+      });
+    }, err=> console.error('[notifications] announcement listener failed:', err));
+  });
+}
+
+function stopAnnouncementNotifications(){
+  if(NOTIF_UNSUB){ try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null; }
 }
 
 /* ================================================================
@@ -1043,6 +1141,7 @@ auth.onAuthStateChanged(async (user) => {
   if(!user){
     CURRENT_PROFILE = null; CURRENT_ROLE = null;
     CURRENT_SESSION_ID = null;
+    stopAnnouncementNotifications();
     STATE.screen = 'auth';
     renderScreen();
     return;
@@ -1079,6 +1178,7 @@ auth.onAuthStateChanged(async (user) => {
         CURRENT_PROFILE = data;
         STATE.screen = 'student';
         renderScreen();
+        startAnnouncementNotifications();
       }catch(sessionErr){
         if(sessionErr && sessionErr.code === 'device-locked'){
           CURRENT_SESSION_ID = null; setLocalSessionId(null);
@@ -1090,6 +1190,7 @@ auth.onAuthStateChanged(async (user) => {
           CURRENT_PROFILE = data;
           STATE.screen = 'student';
           renderScreen();
+          startAnnouncementNotifications();
         }
       }
       return;
@@ -2100,6 +2201,50 @@ function renderProfileTab(container){
       </div>
     </div>
   `));
+  container.appendChild(el(`
+    <div class="card" id="notifCard">
+      <div class="card-title">🔔 Browser Notifications</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
+        Get a browser notification for new announcements while the TMS is open in a background tab. This app doesn't use server-side push, so notifications won't arrive while the browser is completely closed.
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <span id="notifStatusLabel" style="font-size:12px;font-weight:700"></span>
+        <button class="btn btn-primary" id="notifEnableBtn" style="width:auto;padding:8px 16px">Enable Notifications</button>
+      </div>
+      <div id="notifHint" style="font-size:11px;color:var(--text-dim);margin-top:8px;display:none;line-height:1.5"></div>
+    </div>
+  `));
+  function refreshNotifCard(){
+    const label = $('#notifStatusLabel', container);
+    const btn = $('#notifEnableBtn', container);
+    const hint = $('#notifHint', container);
+    if(!label) return;
+    if(!notificationSupport()){
+      label.textContent = 'Not supported'; label.style.color = 'var(--text-dim)';
+      btn.style.display = 'none';
+      hint.style.display = ''; hint.textContent = 'Browser notifications are not supported on this browser.';
+      return;
+    }
+    if(Notification.permission === 'granted'){
+      label.textContent = 'Notifications Enabled'; label.style.color = 'var(--success)';
+      btn.style.display = 'none';
+      hint.style.display = 'none';
+    } else if(Notification.permission === 'denied'){
+      label.textContent = 'Notifications Blocked'; label.style.color = 'var(--danger)';
+      btn.style.display = 'none';
+      hint.style.display = ''; hint.textContent = 'Notifications are blocked by your browser. You can enable them from browser/site settings.';
+    } else {
+      label.textContent = 'Not enabled'; label.style.color = 'var(--text-muted)';
+      btn.style.display = '';
+      hint.style.display = 'none';
+    }
+  }
+  refreshNotifCard();
+  $('#notifEnableBtn', container).addEventListener('click', async ()=>{
+    const perm = await requestNotificationPermission();
+    if(perm === 'unsupported'){ toast('Not supported on this browser'); }
+    refreshNotifCard();
+  });
   container.appendChild(el(`
     <div class="card">
       <div class="card-title">💰 Payment history</div>
