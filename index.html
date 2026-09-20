@@ -1086,18 +1086,59 @@ async function requestNotificationPermission(){
    startAnnouncementNotifications(). Suppressed while the tab is the
    one the student is actively looking at (Part J): the in-app
    announcement UI already covers that case, so a browser notification
-   on top would just be a redundant duplicate, not a missed one. */
+   on top would just be a redundant duplicate, not a missed one.
+
+   PHASE H FIX: displays via the existing Service Worker registration's
+   registration.showNotification() instead of the page-level
+   `new Notification(...)` constructor — Android Chrome / an installed
+   Android PWA rejects that constructor outright ("Illegal constructor"),
+   which is what the Phase H diagnostic traced this to. service-worker.js
+   itself is untouched — this only calls the standard showNotification()
+   API on the registration that index.html already creates via
+   navigator.serviceWorker.register('service-worker.js'). Click handling
+   is intentionally NOT wired up yet (that needs a notificationclick
+   listener inside service-worker.js itself, deferred to a later phase
+   per this fix's scope) — clicking the notification will simply do
+   nothing for now, same as before this fix in the case where it never
+   even displayed. */
 function showAnnouncementNotification(a){
-  if(!notificationSupport() || Notification.permission !== 'granted') return;
-  if(document.visibilityState === 'visible') return;
-  try{
-    const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
-    const notif = new Notification(a.title || 'Atomic Minds', {
+  // [PHASE H DEBUG - TEMP] keeping these for this fix's own validation pass; strip once confirmed working on Android
+  console.log('[PHASE H DEBUG] showAnnouncementNotification() called for id=', a.id, {
+    supported: notificationSupport(),
+    permission: (typeof Notification!=='undefined') ? Notification.permission : '(no Notification global)',
+    visibilityState: document.visibilityState
+  });
+  if(!notificationSupport() || Notification.permission !== 'granted'){
+    console.log('[PHASE H DEBUG] bailing: not supported or permission not granted');
+    return;
+  }
+  if(document.visibilityState === 'visible'){
+    console.log('[PHASE H DEBUG] bailing: document.visibilityState is "visible" (TMS tab is the foregrounded tab)');
+    return;
+  }
+  if(!('serviceWorker' in navigator)){
+    // Same fallback shape as the existing SW-registration guard elsewhere
+    // in this file — a browser with Notification support but no Service
+    // Worker support is effectively theoretical for this app's targets,
+    // but bail cleanly rather than let navigator.serviceWorker throw.
+    console.log('[PHASE H DEBUG] bailing: no serviceWorker support in this browser');
+    return;
+  }
+  const title = a.title || 'Atomic Minds';
+  const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
+  console.log('[PHASE H DEBUG] attempting registration.showNotification() now, title=', title, 'body=', body);
+  navigator.serviceWorker.ready
+    .then(registration => registration.showNotification(title, {
       body,
       tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
+    }))
+    .then(()=>{
+      console.log('[PHASE H DEBUG] registration.showNotification() succeeded');
+    })
+    .catch(error => {
+      console.log('[PHASE H DEBUG] registration.showNotification() THREW:', error && error.name, error && error.message);
+      console.error('[Phase H] Service Worker notification failed:', error);
     });
-    notif.onclick = ()=>{ window.focus(); notif.close(); };
-  }catch(e){ console.error('[notifications] could not show notification:', e); }
 }
 
 /* Idempotent — safe to call from both doLogin() and a resumed session
@@ -1109,28 +1150,40 @@ function showAnnouncementNotification(a){
    mid-session (Settings tab) starts getting them immediately, with
    nothing here needing to notice that change or restart anything. */
 function startAnnouncementNotifications(){
-  if(NOTIF_UNSUB) return;
+  if(NOTIF_UNSUB){
+    console.log('[PHASE H DEBUG] startAnnouncementNotifications() called but NOTIF_UNSUB already set — skipping duplicate attach'); // [PHASE H DEBUG - TEMP]
+    return;
+  }
+  console.log('[PHASE H DEBUG] startAnnouncementNotifications() called — resolving batch ids...'); // [PHASE H DEBUG - TEMP]
   let seenIds = null; // null = first snapshot not processed yet
   syncAndGetMyBatchIds().then(ids=>{
+    console.log('[PHASE H DEBUG] syncAndGetMyBatchIds resolved:', ids, 'NOTIF_UNSUB already set?', !!NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
     if(!ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
     NOTIF_UNSUB = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
+      console.log('[PHASE H DEBUG] announcement snapshot received, count=', items.length, 'baseline already set?', seenIds!==null); // [PHASE H DEBUG - TEMP]
       if(seenIds === null){
         // First delivery after (re)attaching is the existing backlog, not
         // "new" — mark it all seen and never notify for it (Part G).
         seenIds = new Set(items.map(a=>a.id));
+        console.log('[PHASE H DEBUG] baseline established with', seenIds.size, 'existing announcement id(s):', Array.from(seenIds)); // [PHASE H DEBUG - TEMP]
         return;
       }
       items.forEach(a=>{
         if(seenIds.has(a.id)) return; // already-known doc re-delivered — reconnect/metadata-only change/etc. (Part F)
+        console.log('[PHASE H DEBUG] NEW announcement id detected:', a.id, a.title); // [PHASE H DEBUG - TEMP]
         seenIds.add(a.id);
         showAnnouncementNotification(a);
       });
     }, err=> console.error('[notifications] announcement listener failed:', err));
+    console.log('[PHASE H DEBUG] listenContentByBatchIds() attached, NOTIF_UNSUB is now', typeof NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
   });
 }
 
 function stopAnnouncementNotifications(){
-  if(NOTIF_UNSUB){ try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null; }
+  if(NOTIF_UNSUB){
+    console.log('[PHASE H DEBUG] stopAnnouncementNotifications() — tearing down listener'); // [PHASE H DEBUG - TEMP]
+    try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null;
+  }
 }
 
 /* ================================================================
