@@ -1095,6 +1095,13 @@ auth.onAuthStateChanged(async (user) => {
       return;
     }
     // Neither admin nor active student — bounce back to login.
+    if(!studentDoc.exists){
+      // Permanent Delete case: the Firebase Auth account still works, but
+      // its students/{uid} profile is gone. Never auto-recreate it —
+      // just reject and tell them why, same as a fresh doLogin() attempt
+      // against a missing doc already does.
+      toast('This student account is no longer registered. Please contact the administrator.');
+    }
     await auth.signOut();
   }catch(e){
     console.error(e);
@@ -2709,6 +2716,60 @@ function renderAdminStudents(container){
   }
 }
 
+/* ================================================================
+   PERMANENT STUDENT DELETE (admin-only)
+   ----------------------------------------------------------------
+   Deletes only data OWNED by this one student — never shared teaching
+   content (batches/videos/liveClasses/notes/tests/classSchedules/
+   classScheduleRules/announcements). The collections below are every
+   place in this repo that stores a document keyed by studentId or
+   nested under students/{id} (payments) — see COL and the studentId
+   grep across index.html/firestore.rules. All existing Security Rules
+   for these collections already permit admin delete (allow write /
+   allow update, delete: if isAdmin()) — nothing needed changing there.
+
+   Order matters:
+   1) Release the device/session lock first (same fields "Reset
+      device" already clears) — reuses the existing session-cleanup
+      shape rather than inventing a new one.
+   2) Delete every OTHER student-owned collection, batched and chunked
+      (Firestore's batch limit is 500 ops; 450 leaves headroom).
+   3) Delete students/{id} itself LAST. If anything above throws, the
+      student doc is still there — visible in the admin list, safely
+      retryable — instead of the student silently vanishing from the
+      list while orphaned data is left behind.
+
+   This never touches Firebase Authentication (Spark/client-only — see
+   the caller for the "Auth account still present" notice) and never
+   attempts to auto-recreate a deleted profile — see the
+   !studentDoc.exists branch in onAuthStateChanged.
+   ================================================================ */
+async function permanentlyDeleteStudent(studentId){
+  try{
+    await db.collection(COL.students).doc(studentId).update({
+      deviceId: '', activeSessionId: '', activeDeviceId: '', sessionStartedAt: null
+    });
+  }catch(e){ console.error('[delete-student] session release failed (continuing):', e); }
+
+  async function deleteAllByQuery(query){
+    const snap = await query.get();
+    const refs = snap.docs.map(d=>d.ref);
+    for(let i=0; i<refs.length; i+=450){
+      const batch = db.batch();
+      refs.slice(i, i+450).forEach(r=> batch.delete(r));
+      await batch.commit();
+    }
+  }
+
+  await deleteAllByQuery(db.collection(COL.students).doc(studentId).collection(COL.payments));
+  await deleteAllByQuery(db.collection(COL.enrollments).where('studentId','==',studentId));
+  await deleteAllByQuery(db.collection(COL.testResults).where('studentId','==',studentId));
+  await deleteAllByQuery(db.collection(COL.upgradeRequests).where('studentId','==',studentId));
+  await deleteAllByQuery(db.collection(COL.batchJoinRequests).where('studentId','==',studentId));
+
+  await db.collection(COL.students).doc(studentId).delete();
+}
+
 function openStudentDetail(s){
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeDetail">✕</button><div style="clear:both"></div>
@@ -2725,6 +2786,7 @@ function openStudentDetail(s){
         <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${s.active===false?'✅ Activate':'🚫 Deactivate'}</button>
         <button class="btn btn-ghost" id="resetDevice">🔄 Reset device</button>
       </div>
+      <button class="btn btn-danger" id="permDelete" style="width:100%;margin-top:8px">🗑️ Permanent Delete</button>
       ${s.active===false && s.deactivationReason ? `<div style="background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);font-size:12px;padding:8px 10px;border-radius:8px;margin-top:10px"><b>Reason:</b> ${esc(s.deactivationReason)}</div>` : ''}
     </div>
     <div class="card">
@@ -2781,6 +2843,27 @@ function openStudentDetail(s){
       sessionStartedAt: null
     });
     toast('Device reset — student can log in on a new device now.');
+  });
+  $('#permDelete', overlay).addEventListener('click', async ()=>{
+    if(!confirm('Are you sure you want to permanently delete this student?')) return;
+    if(!confirm('All student-specific TMS data will be permanently deleted.\nThis action cannot be undone.')) return;
+    const btn = $('#permDelete', overlay);
+    btn.disabled = true; btn.textContent = 'Deleting...';
+    try{
+      await permanentlyDeleteStudent(s.id);
+      toast('Student data permanently deleted.');
+      // The Firebase Auth account is client-side-only and untouched — see
+      // the "Do NOT attempt to delete the Firebase Authentication account"
+      // requirement. If that old login is used again, onAuthStateChanged's
+      // !studentDoc.exists branch rejects it without recreating a profile.
+      alert('Student data deleted successfully.\n\nNote: The Firebase Authentication account is still present. If required, delete the Auth account manually from Firebase Console.');
+      if(enrollUnsub) enrollUnsub();
+      overlay.remove();
+    }catch(e){
+      console.error('[delete-student] failed:', e);
+      toast('Could not delete student — check your connection and try again.');
+      btn.disabled = false; btn.textContent = '🗑️ Permanent Delete';
+    }
   });
 
   // ---- Batches card: live list of this student's enrollments + search-to-enroll ----
