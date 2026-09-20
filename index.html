@@ -1065,6 +1065,7 @@ async function doLogout(){
    the moment a student opened, say, the Classes tab.
    ================================================================ */
 let NOTIF_UNSUB = null;
+let NOTIF_META_UNSUB = null; // [NOTIF DEBUG - TEMP] separate diagnostic-only listener, see startAnnouncementNotifications()
 
 function notificationSupport(){ return 'Notification' in window; }
 
@@ -1248,6 +1249,25 @@ function startAnnouncementNotifications(){
       });
     }, err=> console.error('[notifications] announcement listener failed:', err));
     console.log('[PHASE H DEBUG] listenContentByBatchIds() attached, NOTIF_UNSUB is now', typeof NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
+
+    // [NOTIF DEBUG - TEMP] Snapshot-metadata diagnostic — a SEPARATE,
+    // independent raw onSnapshot listener, entirely additional to (not a
+    // modification of) the real notification listener above or of
+    // listenContentByBatchIds() itself, which is shared by every other
+    // tab in this app and is not touched here. Exists only to surface
+    // snapshot.metadata.fromCache / hasPendingWrites, which
+    // listenContentByBatchIds() discards after extracting .docs and so
+    // is otherwise unobservable. Mirrors the same query shape (batchId
+    // in the first up-to-30 ids, active==true) as the first — and for
+    // any real student, only — chunk that listener uses, so the metadata
+    // reported here is representative of the same data.
+    if(NOTIF_META_UNSUB){ try{ NOTIF_META_UNSUB(); }catch(e){} }
+    NOTIF_META_UNSUB = db.collection(COL.announcements)
+      .where('batchId','in', ids.slice(0,30))
+      .where('active','==', true)
+      .onSnapshot(snap=>{
+        notifDebugLog('SNAPSHOT META: fromCache=' + snap.metadata.fromCache + '  hasPendingWrites=' + snap.metadata.hasPendingWrites + '  docs=' + snap.size);
+      }, err=>{ console.error('[notifications] metadata diagnostic listener failed:', err); });
   });
 }
 
@@ -1256,6 +1276,7 @@ function stopAnnouncementNotifications(){
     console.log('[PHASE H DEBUG] stopAnnouncementNotifications() — tearing down listener'); // [PHASE H DEBUG - TEMP]
     try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null;
   }
+  if(NOTIF_META_UNSUB){ try{ NOTIF_META_UNSUB(); }catch(e){} NOTIF_META_UNSUB = null; } // [NOTIF DEBUG - TEMP]
 }
 
 /* ================================================================
