@@ -374,8 +374,7 @@ const COL = {
   batches: 'batches',
   enrollments: 'enrollments',
   announcements: 'announcements',
-  classSchedules: 'classSchedules',
-  classScheduleRules: 'classScheduleRules' // Phase F.2 — recurring weekly schedules
+  classSchedules: 'classSchedules'
 };
 
 const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
@@ -1009,7 +1008,6 @@ async function doLogin(email, password){
     CURRENT_PROFILE = data;
     STATE.screen = 'student';
     renderScreen();
-    startAnnouncementNotifications();
   } finally {
     LOGIN_IN_PROGRESS = false;
   }
@@ -1033,157 +1031,7 @@ async function doLogout(){
   }
   CURRENT_SESSION_ID = null;
   setLocalSessionId(null);
-  stopAnnouncementNotifications();
   auth.signOut();
-}
-
-/* ================================================================
-   BROWSER NOTIFICATIONS (Phase H)
-   ----------------------------------------------------------------
-   Foreground-only, Firestore-listener-driven browser notifications.
-   No FCM, no push server, no service worker involved — deliberately:
-   this only ever fires while the TMS tab is open and this listener is
-   live (same lifetime as every other real-time feature in this app),
-   so a plain page-level Notification works for both showing and
-   click-handling (its own onclick just focuses this window — see
-   showAnnouncementNotification()). This app has no URL router, so
-   "focus the TMS" is the full extent of the click destination, which
-   is explicitly an acceptable outcome for a single-page app like this
-   one. (service-worker.js itself was not part of this change — see
-   the phase report for why extending it wasn't necessary here.)
-
-   Lifecycle: started once per login (doLogin() and the resumed-session
-   branches of onAuthStateChanged() below both call
-   startAnnouncementNotifications(), which is idempotent), stopped on
-   doLogout() and on the top-level "signed out" branch of
-   onAuthStateChanged() — so it also stops for every OTHER sign-out
-   path (deactivated, device-locked, deleted student), without having
-   to duplicate the stop call in each of those branches individually.
-   Deliberately NOT registered via trackUnsub()/clearUnsubs(): those
-   are torn down and rebuilt on every single tab switch (see
-   renderScreen()), which would otherwise silently kill this listener
-   the moment a student opened, say, the Classes tab.
-   ================================================================ */
-let NOTIF_UNSUB = null;
-
-function notificationSupport(){ return 'Notification' in window; }
-
-/* Only ever called from the explicit "Enable Notifications" button in
-   Settings (Part C) — never on page load / login, so a student is
-   never prompted just for opening the app. Never re-prompts once
-   denied — the browser wouldn't show a popup for that anyway, but this
-   also skips the pointless call entirely and just reports the state. */
-async function requestNotificationPermission(){
-  if(!notificationSupport()) return 'unsupported';
-  if(Notification.permission === 'granted') return 'granted';
-  if(Notification.permission === 'denied') return 'denied';
-  try{ return await Notification.requestPermission(); }
-  catch(e){ console.error('[notifications] permission request failed:', e); return Notification.permission; }
-}
-
-/* Shows one native browser notification for a newly-received
-   announcement — never for the initial/already-seen backlog, see
-   startAnnouncementNotifications(). Suppressed while the tab is the
-   one the student is actively looking at (Part J): the in-app
-   announcement UI already covers that case, so a browser notification
-   on top would just be a redundant duplicate, not a missed one.
-
-   PHASE H FIX: displays via the existing Service Worker registration's
-   registration.showNotification() instead of the page-level
-   `new Notification(...)` constructor — Android Chrome / an installed
-   Android PWA rejects that constructor outright ("Illegal constructor"),
-   which is what the Phase H diagnostic traced this to. service-worker.js
-   itself is untouched — this only calls the standard showNotification()
-   API on the registration that index.html already creates via
-   navigator.serviceWorker.register('service-worker.js'). Click handling
-   is intentionally NOT wired up yet (that needs a notificationclick
-   listener inside service-worker.js itself, deferred to a later phase
-   per this fix's scope) — clicking the notification will simply do
-   nothing for now, same as before this fix in the case where it never
-   even displayed. */
-function showAnnouncementNotification(a){
-  // [PHASE H DEBUG - TEMP] keeping these for this fix's own validation pass; strip once confirmed working on Android
-  console.log('[PHASE H DEBUG] showAnnouncementNotification() called for id=', a.id, {
-    supported: notificationSupport(),
-    permission: (typeof Notification!=='undefined') ? Notification.permission : '(no Notification global)',
-    visibilityState: document.visibilityState
-  });
-  if(!notificationSupport() || Notification.permission !== 'granted'){
-    console.log('[PHASE H DEBUG] bailing: not supported or permission not granted');
-    return;
-  }
-  if(document.visibilityState === 'visible'){
-    console.log('[PHASE H DEBUG] bailing: document.visibilityState is "visible" (TMS tab is the foregrounded tab)');
-    return;
-  }
-  if(!('serviceWorker' in navigator)){
-    // Same fallback shape as the existing SW-registration guard elsewhere
-    // in this file — a browser with Notification support but no Service
-    // Worker support is effectively theoretical for this app's targets,
-    // but bail cleanly rather than let navigator.serviceWorker throw.
-    console.log('[PHASE H DEBUG] bailing: no serviceWorker support in this browser');
-    return;
-  }
-  const title = a.title || 'Atomic Minds';
-  const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
-  console.log('[PHASE H DEBUG] attempting registration.showNotification() now, title=', title, 'body=', body);
-  navigator.serviceWorker.ready
-    .then(registration => registration.showNotification(title, {
-      body,
-      tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
-    }))
-    .then(()=>{
-      console.log('[PHASE H DEBUG] registration.showNotification() succeeded');
-    })
-    .catch(error => {
-      console.log('[PHASE H DEBUG] registration.showNotification() THREW:', error && error.name, error && error.message);
-      console.error('[Phase H] Service Worker notification failed:', error);
-    });
-}
-
-/* Idempotent — safe to call from both doLogin() and a resumed session
-   without double-attaching (NOTIF_UNSUB already set = already running).
-   Runs regardless of current Notification.permission: the listener
-   itself is just the same Firestore read every other tab already does,
-   and showAnnouncementNotification() is what actually gates on
-   permission — kept this way so a student who enables notifications
-   mid-session (Settings tab) starts getting them immediately, with
-   nothing here needing to notice that change or restart anything. */
-function startAnnouncementNotifications(){
-  if(NOTIF_UNSUB){
-    console.log('[PHASE H DEBUG] startAnnouncementNotifications() called but NOTIF_UNSUB already set — skipping duplicate attach'); // [PHASE H DEBUG - TEMP]
-    return;
-  }
-  console.log('[PHASE H DEBUG] startAnnouncementNotifications() called — resolving batch ids...'); // [PHASE H DEBUG - TEMP]
-  let seenIds = null; // null = first snapshot not processed yet
-  syncAndGetMyBatchIds().then(ids=>{
-    console.log('[PHASE H DEBUG] syncAndGetMyBatchIds resolved:', ids, 'NOTIF_UNSUB already set?', !!NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
-    if(!ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
-    NOTIF_UNSUB = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
-      console.log('[PHASE H DEBUG] announcement snapshot received, count=', items.length, 'baseline already set?', seenIds!==null); // [PHASE H DEBUG - TEMP]
-      if(seenIds === null){
-        // First delivery after (re)attaching is the existing backlog, not
-        // "new" — mark it all seen and never notify for it (Part G).
-        seenIds = new Set(items.map(a=>a.id));
-        console.log('[PHASE H DEBUG] baseline established with', seenIds.size, 'existing announcement id(s):', Array.from(seenIds)); // [PHASE H DEBUG - TEMP]
-        return;
-      }
-      items.forEach(a=>{
-        if(seenIds.has(a.id)) return; // already-known doc re-delivered — reconnect/metadata-only change/etc. (Part F)
-        console.log('[PHASE H DEBUG] NEW announcement id detected:', a.id, a.title); // [PHASE H DEBUG - TEMP]
-        seenIds.add(a.id);
-        showAnnouncementNotification(a);
-      });
-    }, err=> console.error('[notifications] announcement listener failed:', err));
-    console.log('[PHASE H DEBUG] listenContentByBatchIds() attached, NOTIF_UNSUB is now', typeof NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
-  });
-}
-
-function stopAnnouncementNotifications(){
-  if(NOTIF_UNSUB){
-    console.log('[PHASE H DEBUG] stopAnnouncementNotifications() — tearing down listener'); // [PHASE H DEBUG - TEMP]
-    try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null;
-  }
 }
 
 /* ================================================================
@@ -1194,7 +1042,6 @@ auth.onAuthStateChanged(async (user) => {
   if(!user){
     CURRENT_PROFILE = null; CURRENT_ROLE = null;
     CURRENT_SESSION_ID = null;
-    stopAnnouncementNotifications();
     STATE.screen = 'auth';
     renderScreen();
     return;
@@ -1231,7 +1078,6 @@ auth.onAuthStateChanged(async (user) => {
         CURRENT_PROFILE = data;
         STATE.screen = 'student';
         renderScreen();
-        startAnnouncementNotifications();
       }catch(sessionErr){
         if(sessionErr && sessionErr.code === 'device-locked'){
           CURRENT_SESSION_ID = null; setLocalSessionId(null);
@@ -1243,19 +1089,11 @@ auth.onAuthStateChanged(async (user) => {
           CURRENT_PROFILE = data;
           STATE.screen = 'student';
           renderScreen();
-          startAnnouncementNotifications();
         }
       }
       return;
     }
     // Neither admin nor active student — bounce back to login.
-    if(!studentDoc.exists){
-      // Permanent Delete case: the Firebase Auth account still works, but
-      // its students/{uid} profile is gone. Never auto-recreate it —
-      // just reject and tell them why, same as a fresh doLogin() attempt
-      // against a missing doc already does.
-      toast('This student account is no longer registered. Please contact the administrator.');
-    }
     await auth.signOut();
   }catch(e){
     console.error(e);
@@ -1608,110 +1446,6 @@ function listenScheduleByBatchIds(batchIds, firstDay, lastDay, onChange, onError
   return ()=> unsubs.forEach(u=>u());
 }
 
-/* ================================================================
-   RECURRING WEEKLY SCHEDULES (Phase F.2)
-   ----------------------------------------------------------------
-   Stored as a SEPARATE collection, classScheduleRules — one document
-   per recurring series (e.g. "every Tue+Sun, 1 Oct - 31 Dec"), never
-   as individual generated classSchedules documents. The Student
-   Calendar expands each rule into virtual per-day occurrences,
-   client-side, only for the month currently being viewed — see
-   expandRuleOccurrences() below. Nothing is ever written to Firestore
-   for an individual occurrence; the only writes are to the rule
-   itself (create/edit/pause/delete) and to its `overrides` map for a
-   one-off cancel/reschedule (see makeRuleOccurrence()).
-
-   Read access follows the EXACT same batchId/activeBatchIds shape as
-   classSchedules (see firestore.rules) — reusing listenContentByBatchIds()
-   with extraWhere {field:'status', value:'active'} is deliberate: that's
-   an equality filter on top of the existing batchId 'in' filter, same
-   shape as the already-working announcements query, so it doesn't need
-   the kind of composite index classSchedules needed for its date RANGE
-   filter. If Firestore's console says otherwise when this is first
-   exercised, the calendar's error handler below will show the direct
-   "create it here" link — same as it did for the original index issue.
-
-   Day-of-week convention (must match firestore.rules comments and the
-   admin picker): 0=Sunday .. 6=Saturday, i.e. plain JS Date#getDay().
-   ================================================================ */
-
-function daysOfWeekLabel(daysArr){
-  const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const sorted = (daysArr||[]).slice().sort((a,b)=>a-b);
-  if(!sorted.length) return '';
-  return 'Every ' + sorted.map(i=>names[i]||'?').join(' & ');
-}
-
-/* Turns ONE recurring rule document into virtual occurrence objects,
-   shaped exactly like a classSchedules document (same fields
-   renderCalendarGrid()/renderDaySchedule() already read), for every
-   date in [firstDay,lastDay] the rule actually falls on. All date math
-   uses local Date(year,monthIndex,day) components — never parses a
-   "YYYY-MM-DD" string straight into `new Date(...)`, which can shift
-   the date by the viewer's timezone offset — so a class stays on the
-   day it says regardless of the student's browser timezone. */
-function expandRuleOccurrences(rule, firstDay, lastDay){
-  const out = [];
-  if(!rule.startDate || !rule.endDate || !Array.isArray(rule.daysOfWeek)) return out;
-  const overrides = rule.overrides || {};
-  const start = rule.startDate > firstDay ? rule.startDate : firstDay;
-  const end = rule.endDate < lastDay ? rule.endDate : lastDay;
-
-  if(start <= end){
-    const [sy,sm,sd] = start.split('-').map(Number);
-    const [ey,em,ed] = end.split('-').map(Number);
-    let cur = new Date(sy, sm-1, sd);
-    const endDate = new Date(ey, em-1, ed);
-    while(cur <= endDate){
-      if(rule.daysOfWeek.includes(cur.getDay())){
-        const dateStr = ymd(cur.getFullYear(), cur.getMonth(), cur.getDate());
-        const ov = overrides[dateStr];
-        if(!ov){
-          out.push(makeRuleOccurrence(rule, dateStr, dateStr, 'scheduled', null));
-        } else if(ov.status === 'cancelled'){
-          out.push(makeRuleOccurrence(rule, dateStr, dateStr, 'cancelled', null));
-        }
-        // ov.status === 'rescheduled': nothing shows on the original date —
-        // the moved occurrence is injected below, keyed by its NEW date.
-      }
-      cur.setDate(cur.getDate()+1);
-    }
-  }
-
-  // Rescheduled occurrences are checked against the visible range by their
-  // NEW date, independently of the day-of-week loop above — this is what
-  // makes a class moved across a month boundary show up in the month it
-  // was moved TO (and correctly disappear from the month it was moved FROM).
-  Object.keys(overrides).forEach(origDate=>{
-    const ov = overrides[origDate];
-    if(ov && ov.status === 'rescheduled' && ov.newDate >= firstDay && ov.newDate <= lastDay){
-      out.push(makeRuleOccurrence(rule, ov.newDate, origDate, 'scheduled', ov));
-    }
-  });
-
-  return out;
-}
-
-function makeRuleOccurrence(rule, displayDate, originalDate, status, ov){
-  return {
-    id: 'rule_'+rule.id+'_'+originalDate, // stable ruleId+occurrenceDate identity
-    ruleId: rule.id,
-    isRecurring: true,
-    originalDate: originalDate,
-    batchId: rule.batchId,
-    batchName: rule.batchName,
-    date: displayDate,
-    startTime: (ov && ov.startTime) || rule.startTime,
-    endTime: (ov && ov.endTime) || rule.endTime,
-    title: rule.title,
-    topic: rule.topic,
-    classType: rule.classType,
-    teacher: rule.teacher,
-    status: status,
-    rescheduled: !!ov
-  };
-}
-
 function renderCalendarTab(container){
   const now = new Date();
   if(STATE.calendarYear==null){ STATE.calendarYear = now.getFullYear(); STATE.calendarMonthIdx = now.getMonth(); }
@@ -1747,49 +1481,11 @@ function renderCalendarTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ grid.innerHTML=''; dayList.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-
-    // Phase F.2: the calendar now merges TWO live sources — one-time
-    // classSchedules (unchanged) and recurring classScheduleRules, expanded
-    // client-side into virtual occurrences for just this visible month
-    // (expandRuleOccurrences() above). Both are independent onSnapshot
-    // listeners; either one updating re-renders the merged result. Neither
-    // waits forever on the other — each starts from `[]`, so if one
-    // collection is simply empty (e.g. no recurring rules yet) the other
-    // still renders normally instead of hanging on a spinner.
-    let oneTimeItems = [], ruleDocs = [], loadError = null;
-
-    function showLoadError(err){
-      // Same diagnostic error surfacing as the original one-time-only
-      // calendar fix — see comment history above expandRuleOccurrences().
-      const code = err && err.code;
-      let msg = 'Could not load — check your connection.';
-      if(code === 'failed-precondition'){
-        msg = 'Calendar setup incomplete — a database index is missing. Open the browser console for a link to create it.';
-      } else if(code === 'permission-denied'){
-        msg = 'Could not load your schedule — your batch access may be out of date. Try logging out and back in.';
-      }
-      grid.innerHTML = '';
-      dayList.innerHTML = `<div class="empty-state">${esc(msg)}</div>`;
-    }
-
-    function renderMerged(){
-      if(loadError){ showLoadError(loadError); return; }
-      const recurringOccurrences = [];
-      ruleDocs.forEach(rule=> recurringOccurrences.push(...expandRuleOccurrences(rule, firstDay, lastDay)));
-      const merged = oneTimeItems.concat(recurringOccurrences);
-      renderCalendarGrid(grid, y, m, merged);
-      renderDaySchedule(dayList, merged);
-    }
-
-    const unsub1 = listenScheduleByBatchIds(ids, firstDay, lastDay, items=>{
-      oneTimeItems = items; renderMerged();
-    }, (err)=>{ loadError = err; renderMerged(); });
-    trackUnsub(unsub1);
-
-    const unsub2 = listenContentByBatchIds(COL.classScheduleRules, ids, {field:'status', value:'active'}, items=>{
-      ruleDocs = items; renderMerged();
-    }, (err)=>{ loadError = err; renderMerged(); });
-    trackUnsub(unsub2);
+    const unsub = listenScheduleByBatchIds(ids, firstDay, lastDay, items=>{
+      renderCalendarGrid(grid, y, m, items);
+      renderDaySchedule(dayList, items);
+    }, ()=>{ dayList.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+    trackUnsub(unsub);
   });
 }
 
@@ -2254,50 +1950,6 @@ function renderProfileTab(container){
       </div>
     </div>
   `));
-  container.appendChild(el(`
-    <div class="card" id="notifCard">
-      <div class="card-title">🔔 Browser Notifications</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
-        Get a browser notification for new announcements while the TMS is open in a background tab. This app doesn't use server-side push, so notifications won't arrive while the browser is completely closed.
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-        <span id="notifStatusLabel" style="font-size:12px;font-weight:700"></span>
-        <button class="btn btn-primary" id="notifEnableBtn" style="width:auto;padding:8px 16px">Enable Notifications</button>
-      </div>
-      <div id="notifHint" style="font-size:11px;color:var(--text-dim);margin-top:8px;display:none;line-height:1.5"></div>
-    </div>
-  `));
-  function refreshNotifCard(){
-    const label = $('#notifStatusLabel', container);
-    const btn = $('#notifEnableBtn', container);
-    const hint = $('#notifHint', container);
-    if(!label) return;
-    if(!notificationSupport()){
-      label.textContent = 'Not supported'; label.style.color = 'var(--text-dim)';
-      btn.style.display = 'none';
-      hint.style.display = ''; hint.textContent = 'Browser notifications are not supported on this browser.';
-      return;
-    }
-    if(Notification.permission === 'granted'){
-      label.textContent = 'Notifications Enabled'; label.style.color = 'var(--success)';
-      btn.style.display = 'none';
-      hint.style.display = 'none';
-    } else if(Notification.permission === 'denied'){
-      label.textContent = 'Notifications Blocked'; label.style.color = 'var(--danger)';
-      btn.style.display = 'none';
-      hint.style.display = ''; hint.textContent = 'Notifications are blocked by your browser. You can enable them from browser/site settings.';
-    } else {
-      label.textContent = 'Not enabled'; label.style.color = 'var(--text-muted)';
-      btn.style.display = '';
-      hint.style.display = 'none';
-    }
-  }
-  refreshNotifCard();
-  $('#notifEnableBtn', container).addEventListener('click', async ()=>{
-    const perm = await requestNotificationPermission();
-    if(perm === 'unsupported'){ toast('Not supported on this browser'); }
-    refreshNotifCard();
-  });
   container.appendChild(el(`
     <div class="card">
       <div class="card-title">💰 Payment history</div>
@@ -2914,60 +2566,6 @@ function renderAdminStudents(container){
   }
 }
 
-/* ================================================================
-   PERMANENT STUDENT DELETE (admin-only)
-   ----------------------------------------------------------------
-   Deletes only data OWNED by this one student — never shared teaching
-   content (batches/videos/liveClasses/notes/tests/classSchedules/
-   classScheduleRules/announcements). The collections below are every
-   place in this repo that stores a document keyed by studentId or
-   nested under students/{id} (payments) — see COL and the studentId
-   grep across index.html/firestore.rules. All existing Security Rules
-   for these collections already permit admin delete (allow write /
-   allow update, delete: if isAdmin()) — nothing needed changing there.
-
-   Order matters:
-   1) Release the device/session lock first (same fields "Reset
-      device" already clears) — reuses the existing session-cleanup
-      shape rather than inventing a new one.
-   2) Delete every OTHER student-owned collection, batched and chunked
-      (Firestore's batch limit is 500 ops; 450 leaves headroom).
-   3) Delete students/{id} itself LAST. If anything above throws, the
-      student doc is still there — visible in the admin list, safely
-      retryable — instead of the student silently vanishing from the
-      list while orphaned data is left behind.
-
-   This never touches Firebase Authentication (Spark/client-only — see
-   the caller for the "Auth account still present" notice) and never
-   attempts to auto-recreate a deleted profile — see the
-   !studentDoc.exists branch in onAuthStateChanged.
-   ================================================================ */
-async function permanentlyDeleteStudent(studentId){
-  try{
-    await db.collection(COL.students).doc(studentId).update({
-      deviceId: '', activeSessionId: '', activeDeviceId: '', sessionStartedAt: null
-    });
-  }catch(e){ console.error('[delete-student] session release failed (continuing):', e); }
-
-  async function deleteAllByQuery(query){
-    const snap = await query.get();
-    const refs = snap.docs.map(d=>d.ref);
-    for(let i=0; i<refs.length; i+=450){
-      const batch = db.batch();
-      refs.slice(i, i+450).forEach(r=> batch.delete(r));
-      await batch.commit();
-    }
-  }
-
-  await deleteAllByQuery(db.collection(COL.students).doc(studentId).collection(COL.payments));
-  await deleteAllByQuery(db.collection(COL.enrollments).where('studentId','==',studentId));
-  await deleteAllByQuery(db.collection(COL.testResults).where('studentId','==',studentId));
-  await deleteAllByQuery(db.collection(COL.upgradeRequests).where('studentId','==',studentId));
-  await deleteAllByQuery(db.collection(COL.batchJoinRequests).where('studentId','==',studentId));
-
-  await db.collection(COL.students).doc(studentId).delete();
-}
-
 function openStudentDetail(s){
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeDetail">✕</button><div style="clear:both"></div>
@@ -2984,7 +2582,6 @@ function openStudentDetail(s){
         <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${s.active===false?'✅ Activate':'🚫 Deactivate'}</button>
         <button class="btn btn-ghost" id="resetDevice">🔄 Reset device</button>
       </div>
-      <button class="btn btn-danger" id="permDelete" style="width:100%;margin-top:8px">🗑️ Permanent Delete</button>
       ${s.active===false && s.deactivationReason ? `<div style="background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);font-size:12px;padding:8px 10px;border-radius:8px;margin-top:10px"><b>Reason:</b> ${esc(s.deactivationReason)}</div>` : ''}
     </div>
     <div class="card">
@@ -3041,27 +2638,6 @@ function openStudentDetail(s){
       sessionStartedAt: null
     });
     toast('Device reset — student can log in on a new device now.');
-  });
-  $('#permDelete', overlay).addEventListener('click', async ()=>{
-    if(!confirm('Are you sure you want to permanently delete this student?')) return;
-    if(!confirm('All student-specific TMS data will be permanently deleted.\nThis action cannot be undone.')) return;
-    const btn = $('#permDelete', overlay);
-    btn.disabled = true; btn.textContent = 'Deleting...';
-    try{
-      await permanentlyDeleteStudent(s.id);
-      toast('Student data permanently deleted.');
-      // The Firebase Auth account is client-side-only and untouched — see
-      // the "Do NOT attempt to delete the Firebase Authentication account"
-      // requirement. If that old login is used again, onAuthStateChanged's
-      // !studentDoc.exists branch rejects it without recreating a profile.
-      alert('Student data deleted successfully.\n\nNote: The Firebase Authentication account is still present. If required, delete the Auth account manually from Firebase Console.');
-      if(enrollUnsub) enrollUnsub();
-      overlay.remove();
-    }catch(e){
-      console.error('[delete-student] failed:', e);
-      toast('Could not delete student — check your connection and try again.');
-      btn.disabled = false; btn.textContent = '🗑️ Permanent Delete';
-    }
   });
 
   // ---- Batches card: live list of this student's enrollments + search-to-enroll ----
@@ -3703,39 +3279,11 @@ function renderAdminCalendar(container){
   container.appendChild(el(`<div>
     <div class="card">
       <div class="card-title" id="schFormTitle">📅 New class</div>
-      <div class="field">
-        <label>Schedule type</label>
-        <div class="tab-filter" id="schTypeToggle">
-          <button data-type="onetime" class="active">One-time</button>
-          <button data-type="recurring">Recurring weekly</button>
-        </div>
-      </div>
       <div class="field"><label>Audience / Batch</label><select id="schBatch"><option value="">Select audience...</option></select></div>
-
-      <div id="schOnetimeFields">
-        <div class="row2">
-          <div class="field"><label>Date</label><input type="date" id="schDate"></div>
-          <div class="field"><label>Class type (optional)</label><input id="schType" placeholder="Regular"></div>
-        </div>
+      <div class="row2">
+        <div class="field"><label>Date</label><input type="date" id="schDate"></div>
+        <div class="field"><label>Class type (optional)</label><input id="schType" placeholder="Regular"></div>
       </div>
-
-      <div id="schRecurringFields" style="display:none">
-        <div class="row2">
-          <div class="field"><label>Start date</label><input type="date" id="schRuleStart"></div>
-          <div class="field"><label>End date</label><input type="date" id="schRuleEnd"></div>
-        </div>
-        <div class="field"><label>Class type (optional)</label><input id="schRuleType" placeholder="Regular"></div>
-        <div class="field">
-          <label>Repeat on</label>
-          <div style="display:flex;flex-wrap:wrap;gap:8px">
-            ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d,i)=>`
-              <label style="display:flex;align-items:center;gap:5px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text-muted)">
-                <input type="checkbox" class="schDow" value="${i}" style="width:auto"> ${d}
-              </label>`).join('')}
-          </div>
-        </div>
-      </div>
-
       <div class="row2">
         <div class="field"><label>Start time</label><input type="time" id="schStart"></div>
         <div class="field"><label>End time</label><input type="time" id="schEnd"></div>
@@ -3752,93 +3300,21 @@ function renderAdminCalendar(container){
     </div>
     <div class="card-title" style="margin:14px 0 8px">All scheduled classes</div>
     <div id="scheduleAdminList"><div class="spinner"></div></div>
-    <div class="card-title" style="margin:14px 0 8px">🔁 Recurring schedules</div>
-    <div id="scheduleRuleList"><div class="spinner"></div></div>
   </div>`));
   loadActiveBatchesInto($('#schBatch', container));
 
-  let editingId = null, editingEntry = null;       // one-time classSchedules doc being edited
-  let editingRuleId = null, editingRule = null;     // classScheduleRules doc being edited
-  let scheduleType = 'onetime';                     // 'onetime' | 'recurring' — which form is active
-
-  function setScheduleType(type){
-    scheduleType = type;
-    $all('#schTypeToggle button', container).forEach(b=> b.classList.toggle('active', b.dataset.type===type));
-    $('#schOnetimeFields', container).style.display = type==='onetime' ? '' : 'none';
-    $('#schRecurringFields', container).style.display = type==='recurring' ? '' : 'none';
-  }
-  $('#schTypeToggle', container).addEventListener('click', e=>{
-    const b = e.target.closest('button'); if(!b) return;
-    resetSchForm(); // switching type mid-edit would mix up two different edit targets — safest to reset
-    setScheduleType(b.dataset.type);
-  });
-
+  let editingId = null, editingEntry = null;
   function resetSchForm(){
     editingId = null; editingEntry = null;
-    editingRuleId = null; editingRule = null;
     $('#schFormTitle', container).textContent = '📅 New class';
-    ['schDate','schType','schStart','schEnd','schTitle','schTopic','schTeacher','schRuleStart','schRuleEnd','schRuleType']
-      .forEach(id=> $('#'+id,container).value='');
-    $all('.schDow', container).forEach(cb=> cb.checked = false);
+    ['schDate','schType','schStart','schEnd','schTitle','schTopic','schTeacher'].forEach(id=> $('#'+id,container).value='');
     $('#schBatch', container).value = '';
     $('#saveSchedule', container).textContent = '📅 Add to schedule';
     $('#cancelEditSch', container).style.display = 'none';
-    setScheduleType('onetime');
   }
   $('#cancelEditSch', container).addEventListener('click', resetSchForm);
 
   $('#saveSchedule', container).addEventListener('click', async ()=>{
-    const btn = $('#saveSchedule',container);
-
-    if(scheduleType === 'recurring'){
-      const batchSel = $('#schBatch',container);
-      const batchId = batchSel.value;
-      const startDate = $('#schRuleStart',container).value;
-      const endDate = $('#schRuleEnd',container).value;
-      const startTime = $('#schStart',container).value;
-      const endTime = $('#schEnd',container).value;
-      const title = $('#schTitle',container).value.trim();
-      const topic = $('#schTopic',container).value.trim();
-      const classType = $('#schRuleType',container).value.trim();
-      const teacher = $('#schTeacher',container).value.trim();
-      const daysOfWeek = $all('.schDow', container).filter(cb=>cb.checked).map(cb=>Number(cb.value));
-      if(!batchId){ toast('Select an audience'); return; }
-      if(!startDate){ toast('Select a start date'); return; }
-      if(!endDate){ toast('Select an end date'); return; }
-      if(endDate < startDate){ toast('End date cannot be before start date'); return; }
-      if(!daysOfWeek.length){ toast('Select at least one repeat day'); return; }
-      if(!startTime || !endTime){ toast('Enter start and end time'); return; }
-      if(endTime <= startTime){ toast('End time must be after start time'); return; }
-      if(!title){ toast('Enter a title'); return; }
-      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
-      btn.disabled = true;
-      try{
-        if(editingRuleId){
-          await db.collection(COL.classScheduleRules).doc(editingRuleId).update({
-            batchId, batchName, startDate, endDate, startTime, endTime, title, topic, classType, teacher, daysOfWeek,
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          toast('Recurring schedule updated');
-        } else {
-          await db.collection(COL.classScheduleRules).add({
-            batchId, batchName, startDate, endDate, startTime, endTime, title, topic, classType, teacher, daysOfWeek,
-            status: 'active', overrides: {},
-            createdBy: CURRENT_USER.uid,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          toast('Recurring schedule created');
-        }
-        resetSchForm();
-      }catch(e){
-        console.error(e);
-        toast('Could not save — check your connection.');
-      }
-      btn.disabled = false;
-      return;
-    }
-
-    // ---- one-time class (unchanged from the original working implementation) ----
     const date = $('#schDate',container).value;
     const startTime = $('#schStart',container).value;
     const endTime = $('#schEnd',container).value;
@@ -3854,7 +3330,7 @@ function renderAdminCalendar(container){
     if(endTime <= startTime){ toast('End time must be after start time'); return; }
     if(!title){ toast('Enter a title'); return; }
     const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
-    btn.disabled = true;
+    const btn = $('#saveSchedule',container); btn.disabled = true;
     try{
       if(editingId){
         const payload = { batchId, batchName, date, startTime, endTime, title, topic, classType, teacher, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
@@ -3914,9 +3390,7 @@ function renderAdminCalendar(container){
       </div>`);
       $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
         if(b.dataset.act==='edit'){
-          resetSchForm();
           editingId = c.id; editingEntry = c;
-          setScheduleType('onetime');
           $('#schFormTitle', container).textContent = '✏️ Edit class';
           $('#schBatch', container).value = c.batchId||'';
           $('#schDate', container).value = c.date||'';
@@ -3946,153 +3420,6 @@ function renderAdminCalendar(container){
     });
   }, err=> console.error(err));
   trackUnsub(unsub);
-
-  /* ================================================================
-     Recurring rule list — series-level management (edit/pause/delete)
-     plus a per-rule "manage a date" mini-form for the one-off
-     cancel/reschedule exceptions the spec calls for. Kept as the
-     smallest safe UI extension: it writes only to this ONE rule's own
-     `overrides` map (dot-path field update / FieldValue.delete()),
-     never touches classSchedules, and never generates new documents.
-     ================================================================ */
-  const ruleListBox = $('#scheduleRuleList', container);
-  const unsubRules = db.collection(COL.classScheduleRules).orderBy('startDate','desc').onSnapshot(snap=>{
-    const rules=[]; snap.forEach(d=>rules.push({id:d.id,...d.data()}));
-    ruleListBox.innerHTML='';
-    if(!rules.length){ ruleListBox.innerHTML='<div class="empty-state">No recurring schedules yet.</div>'; return; }
-    rules.forEach(r=>{
-      const paused = r.status === 'inactive';
-      const overrides = r.overrides || {};
-      const overrideDates = Object.keys(overrides).sort();
-      const card = el(`<div class="item-card">
-        <div class="item-top"><div class="item-icon">🔁</div><div class="item-info">
-          <div class="item-title" style="${paused?'opacity:.6':''}">${esc(r.title||'Class')}</div>
-          <div class="item-meta">${esc(daysOfWeekLabel(r.daysOfWeek))} · ${esc(r.startTime||'')}–${esc(r.endTime||'')}${r.topic?(' · '+esc(r.topic)):''}</div>
-          <div class="item-meta">${esc(r.startDate||'')} → ${esc(r.endDate||'')}</div>
-          <div class="item-badges">
-            <span class="badge badge-muted">${esc(r.batchName||'')}</span>
-            ${paused?'<span class="badge badge-paid">Paused</span>':'<span class="badge badge-free">Active</span>'}
-          </div>
-        </div></div>
-        <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
-          <button class="btn-sm btn-ghost" data-act="toggle">${paused?'▶️ Activate':'⏸️ Pause'}</button>
-          <button class="btn-sm btn-ghost" data-act="manage">📆 Manage a date</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
-        </div>
-        <div class="rule-manage" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">
-          <div class="field"><label>Date to change</label><input type="date" class="mgDate"></div>
-          <div class="row2">
-            <button class="btn-sm btn-danger mgCancelDate">🚫 Cancel this date</button>
-            <button class="btn-sm btn-ghost mgShowReschedule">↻ Reschedule this date</button>
-          </div>
-          <div class="mgRescheduleFields" style="display:none;margin-top:8px">
-            <div class="row2">
-              <div class="field"><label>New date</label><input type="date" class="mgNewDate"></div>
-              <div class="field"><label>New start time</label><input type="time" class="mgNewStart"></div>
-            </div>
-            <div class="field"><label>New end time</label><input type="time" class="mgNewEnd"></div>
-            <button class="btn btn-primary btn-sm mgSaveReschedule">💾 Save reschedule</button>
-          </div>
-          <div class="mgExisting" style="margin-top:10px">
-            ${overrideDates.length ? '<div class="field"><label>Existing exceptions</label></div>' : ''}
-            ${overrideDates.map(d=>{
-              const ov = overrides[d];
-              const desc = ov.status==='cancelled'
-                ? `${esc(d)} — Cancelled`
-                : `${esc(d)} → ${esc(ov.newDate||'')} ${esc(ov.startTime||'')}–${esc(ov.endTime||'')} (Rescheduled)`;
-              return `<div class="item-meta" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
-                <span>${desc}</span>
-                <button class="btn-sm btn-ghost mgRemoveOverride" data-date="${esc(d)}">Remove</button>
-              </div>`;
-            }).join('')}
-          </div>
-        </div>
-      </div>`);
-
-      $('[data-act="manage"]', card).addEventListener('click', ()=>{
-        const box = $('.rule-manage', card);
-        box.style.display = box.style.display==='none' ? '' : 'none';
-      });
-      $('.mgShowReschedule', card).addEventListener('click', ()=>{
-        const box = $('.mgRescheduleFields', card);
-        box.style.display = box.style.display==='none' ? '' : 'none';
-      });
-      $('.mgCancelDate', card).addEventListener('click', async ()=>{
-        const date = $('.mgDate', card).value;
-        if(!date){ toast('Pick a date first'); return; }
-        try{
-          await db.collection(COL.classScheduleRules).doc(r.id).update({
-            [`overrides.${date}`]: { status: 'cancelled' },
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          toast('That date is cancelled');
-        }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
-      });
-      $('.mgSaveReschedule', card).addEventListener('click', async ()=>{
-        const date = $('.mgDate', card).value;
-        const newDate = $('.mgNewDate', card).value;
-        const newStart = $('.mgNewStart', card).value;
-        const newEnd = $('.mgNewEnd', card).value;
-        if(!date){ toast('Pick the original date first'); return; }
-        if(!newDate){ toast('Pick the new date'); return; }
-        if(!newStart || !newEnd){ toast('Enter the new start and end time'); return; }
-        if(newEnd <= newStart){ toast('New end time must be after new start time'); return; }
-        try{
-          await db.collection(COL.classScheduleRules).doc(r.id).update({
-            [`overrides.${date}`]: { status: 'rescheduled', newDate, startTime: newStart, endTime: newEnd },
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          toast('That date is rescheduled');
-        }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
-      });
-      $all('.mgRemoveOverride', card).forEach(b=> b.addEventListener('click', async ()=>{
-        try{
-          await db.collection(COL.classScheduleRules).doc(r.id).update({
-            [`overrides.${b.dataset.date}`]: firebase.firestore.FieldValue.delete(),
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          toast('Exception removed');
-        }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
-      }));
-
-      $('[data-act="edit"]', card).addEventListener('click', ()=>{
-        resetSchForm();
-        editingRuleId = r.id; editingRule = r;
-        setScheduleType('recurring');
-        $('#schFormTitle', container).textContent = '✏️ Edit recurring schedule';
-        $('#schBatch', container).value = r.batchId||'';
-        $('#schRuleStart', container).value = r.startDate||'';
-        $('#schRuleEnd', container).value = r.endDate||'';
-        $('#schStart', container).value = r.startTime||'';
-        $('#schEnd', container).value = r.endTime||'';
-        $('#schTitle', container).value = r.title||'';
-        $('#schTopic', container).value = r.topic||'';
-        $('#schRuleType', container).value = r.classType||'';
-        $('#schTeacher', container).value = r.teacher||'';
-        $all('.schDow', container).forEach(cb=> cb.checked = (r.daysOfWeek||[]).includes(Number(cb.value)));
-        $('#saveSchedule', container).textContent = '💾 Update recurring schedule';
-        $('#cancelEditSch', container).style.display = '';
-      });
-      $('[data-act="toggle"]', card).addEventListener('click', async ()=>{
-        try{
-          await db.collection(COL.classScheduleRules).doc(r.id).update({ status: paused?'active':'inactive', updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
-          toast(paused ? 'Recurring schedule activated' : 'Recurring schedule paused');
-        }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
-      });
-      $('[data-act="del"]', card).addEventListener('click', async ()=>{
-        if(!confirm('Delete this recurring schedule? Students will no longer see any of its future classes. Past occurrences already shown to students are unaffected — this does not touch one-time classes, students, enrollments, batches, content, results or payments.')) return;
-        try{
-          await db.collection(COL.classScheduleRules).doc(r.id).delete();
-          toast('Deleted');
-          if(editingRuleId===r.id) resetSchForm();
-        }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
-      });
-
-      ruleListBox.appendChild(card);
-    });
-  }, err=> console.error(err));
-  trackUnsub(unsubRules);
 }
 
 /* ================================================================
