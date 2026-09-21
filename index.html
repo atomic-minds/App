@@ -289,6 +289,18 @@ mjx-container{color:var(--text) !important}
 .badge-suspended{background:var(--warning-bg);color:var(--warning)}
 .badge-expired{background:var(--danger-bg);color:var(--danger)}
 
+/* -------- dashboard promotional banner carousel -------- */
+.banner-carousel-wrap{margin:0 0 12px}
+.banner-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;
+  -webkit-overflow-scrolling:touch;padding:2px 14px 4px;scrollbar-width:none}
+.banner-track::-webkit-scrollbar{display:none}
+.banner-slide{flex:0 0 88%;scroll-snap-align:center;aspect-ratio:16/9;border-radius:16px;
+  overflow:hidden;box-shadow:0 8px 22px rgba(0,0,0,.35);background:var(--surface-2)}
+.banner-slide img{width:100%;height:100%;object-fit:cover;display:block}
+.banner-dots{display:flex;justify-content:center;gap:6px;margin-top:8px}
+.banner-dot{width:6px;height:6px;border-radius:50%;background:var(--border);transition:background .2s,width .2s}
+.banner-dot.active{background:var(--accent);width:16px;border-radius:4px}
+
 @media(min-width:481px){
   .content-area,.bottom-nav{max-width:480px}
 }
@@ -375,7 +387,8 @@ const COL = {
   enrollments: 'enrollments',
   announcements: 'announcements',
   classSchedules: 'classSchedules',
-  classScheduleRules: 'classScheduleRules' // Phase F.2 — recurring weekly schedules
+  classScheduleRules: 'classScheduleRules', // Phase F.2 — recurring weekly schedules
+  banners: 'banners' // Dashboard promo carousel — deliberately separate from announcements, see renderBannerCarousel()
 };
 
 const BRAND = { name: 'Atomic Minds', tagline: 'Stop Memorizing. Start realizing.' };
@@ -1363,6 +1376,80 @@ function renderDashboardTab(container){
     renderScreen();
   });
   container.appendChild(links);
+  renderBannerCarousel(container);
+}
+
+/* ================================================================
+   DASHBOARD PROMOTIONAL BANNER CAROUSEL
+   ----------------------------------------------------------------
+   Purely decorative — greetings, special-occasion messages, new-batch
+   promos, etc. Deliberately kept SEPARATE from the Announcements
+   system: no Phase H notification listener, no browser notification,
+   no dedup/baseline logic — none of that machinery is touched by or
+   even aware of this feature. General/everyone only, no batch
+   targeting, so there's no syncAndGetMyBatchIds() dependency here —
+   the Firestore Rule's isActiveStudent() check is the entire
+   authorization, same shape as every other student-only read.
+
+   Sorting by `order` happens client-side, not via a Firestore
+   orderBy() — specifically so this query (a plain
+   where('active','==',true)) never needs a composite index, the same
+   lesson this project already learned the hard way with classSchedules.
+   Auto-advance is a plain client-side setInterval driving scrollTo() —
+   not a Firestore poll and not a session heartbeat; nothing here reads
+   or writes Firestore on a timer, and the interval is torn down via
+   trackUnsub() exactly like every other per-screen resource in this
+   app, so it never survives a tab switch. */
+function renderBannerCarousel(container){
+  const wrap = el(`<div class="banner-carousel-wrap" style="display:none">
+    <div class="banner-track"></div>
+    <div class="banner-dots"></div>
+  </div>`);
+  container.appendChild(wrap);
+  const track = $('.banner-track', wrap);
+  const dotsBox = $('.banner-dots', wrap);
+
+  let autoTimer = null;
+  let userInteracting = false;
+  let interactionResetTimer = null;
+  function clearAuto(){ if(autoTimer){ clearInterval(autoTimer); autoTimer = null; } }
+  trackUnsub(clearAuto);
+
+  function slideStep(){
+    return track.firstElementChild ? track.firstElementChild.getBoundingClientRect().width + 12 : 0; // +gap
+  }
+  function goTo(i){ track.scrollTo({left: i*slideStep(), behavior:'smooth'}); }
+
+  const unsub = db.collection(COL.banners).where('active','==',true).onSnapshot(snap=>{
+    const items = []; snap.forEach(d=> items.push({id:d.id, ...d.data()}));
+    items.sort((a,b)=> (a.order||0) - (b.order||0));
+    clearAuto();
+    track.innerHTML = ''; dotsBox.innerHTML = '';
+    if(!items.length){ wrap.style.display = 'none'; return; } // nothing to show — stay hidden rather than showing an empty frame
+    wrap.style.display = '';
+    items.forEach(b=>{
+      track.appendChild(el(`<div class="banner-slide"><img src="${esc(b.imageUrl)}" alt="" loading="lazy"></div>`));
+    });
+    if(items.length > 1){
+      items.forEach((b,i)=> dotsBox.appendChild(el(`<span class="banner-dot${i===0?' active':''}" data-i="${i}"></span>`)));
+      function updateDots(){
+        const idx = Math.round(track.scrollLeft / slideStep());
+        $all('.banner-dot', dotsBox).forEach((d,i)=> d.classList.toggle('active', i===idx));
+      }
+      track.addEventListener('scroll', ()=>{
+        updateDots();
+        clearTimeout(interactionResetTimer);
+        userInteracting = true;
+        interactionResetTimer = setTimeout(()=>{ userInteracting = false; }, 2500); // resume auto-advance a bit after the swipe settles
+      });
+      autoTimer = setInterval(()=>{
+        if(userInteracting) return;
+        const idx = Math.round(track.scrollLeft / slideStep());
+        goTo((idx + 1) % items.length);
+      }, 4500);
+    }
+  }, err=> console.error('[banners] listener failed:', err));
+  trackUnsub(unsub);
 }
 
 /* Renders the "Select Batch" dropdown (only ever called when the
@@ -2558,6 +2645,7 @@ function renderAdminShell(){
     else if(STATE.adminTab==='notes') renderAdminNotes(content);
     else if(STATE.adminTab==='announcements') renderAdminAnnouncements(content);
     else if(STATE.adminTab==='calendar') renderAdminCalendar(content);
+    else if(STATE.adminTab==='banners') renderAdminBanners(content);
     else if(STATE.adminTab==='requests') renderAdminUpgradeRequests(content);
   }
   return shell;
@@ -2573,6 +2661,7 @@ function openAdminDrawer(){
     { key:'notes', icon:'📄', label:'Notes', onSelect:()=>{ STATE.adminTab='notes'; renderScreen(); } },
     { key:'announcements', icon:'📢', label:'Announcements', onSelect:()=>{ STATE.adminTab='announcements'; renderScreen(); } },
     { key:'calendar', icon:'📅', label:'Calendar', onSelect:()=>{ STATE.adminTab='calendar'; renderScreen(); } },
+    { key:'banners', icon:'🖼️', label:'Dashboard Banners', onSelect:()=>{ STATE.adminTab='banners'; renderScreen(); } },
     { key:'requests', icon:'📚', label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:'🚪', label:'Log out', onSelect: doLogout }
@@ -2595,6 +2684,7 @@ function renderAdminHome(container){
       <button class="home-tile" data-t="notes"><span class="ht-icon">📄</span><span class="ht-label">Notes</span></button>
       <button class="home-tile" data-t="announcements"><span class="ht-icon">📢</span><span class="ht-label">Announcements</span></button>
       <button class="home-tile" data-t="calendar"><span class="ht-icon">📅</span><span class="ht-label">Calendar</span></button>
+      <button class="home-tile" data-t="banners"><span class="ht-icon">🖼️</span><span class="ht-label">Dashboard Banners</span></button>
       <button class="home-tile" data-t="requests" style="position:relative">
         <span class="ht-icon">📚</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
@@ -3751,6 +3841,121 @@ function renderAdminAnnouncements(container){
             await db.collection(COL.announcements).doc(a.id).delete();
             toast('Deleted');
             if(editingId===a.id) resetAnnForm();
+          }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
+        }
+      }));
+      listBox.appendChild(card);
+    });
+  }, err=> console.error(err));
+  trackUnsub(unsub);
+}
+
+/* Admin CRUD for the dashboard promotional banner carousel. Deliberately
+   modeled on renderAdminAnnouncements() above for consistency, but
+   simpler — banners are general/everyone only (no audience/batch field
+   at all) and carry no active-student notification behavior. */
+function renderAdminBanners(container){
+  container.appendChild(el(`<div>
+    <div class="card">
+      <div class="card-title" id="bnrFormTitle">🖼️ New banner</div>
+      <div class="field"><label>Label (admin only — not shown to students)</label><input id="bnrTitle" placeholder="Diwali Greeting"></div>
+      <div class="field"><label>Image URL</label><input id="bnrImageUrl" placeholder="https://..."></div>
+      <div class="field"><label>Order (lower shows first — optional)</label><input id="bnrOrder" type="number" placeholder="0"></div>
+      <div class="row2">
+        <button class="btn btn-primary" id="saveBanner">🖼️ Add banner</button>
+        <button class="btn btn-ghost" id="cancelEditBnr" style="display:none">Cancel edit</button>
+      </div>
+    </div>
+    <div class="card-title" style="margin:14px 0 8px">All banners</div>
+    <div id="bannersAdminList"><div class="spinner"></div></div>
+  </div>`));
+
+  let editingId = null;
+  function resetBnrForm(){
+    editingId = null;
+    $('#bnrFormTitle', container).textContent = '🖼️ New banner';
+    $('#bnrTitle', container).value = '';
+    $('#bnrImageUrl', container).value = '';
+    $('#bnrOrder', container).value = '';
+    $('#saveBanner', container).textContent = '🖼️ Add banner';
+    $('#cancelEditBnr', container).style.display = 'none';
+  }
+  $('#cancelEditBnr', container).addEventListener('click', resetBnrForm);
+
+  $('#saveBanner', container).addEventListener('click', async ()=>{
+    const title = $('#bnrTitle',container).value.trim();
+    const imageUrl = $('#bnrImageUrl',container).value.trim();
+    const orderRaw = $('#bnrOrder',container).value.trim();
+    const order = orderRaw === '' ? 0 : Number(orderRaw);
+    if(!title){ toast('Enter a label'); return; }
+    if(!imageUrl || !/^https?:\/\//i.test(imageUrl)){ toast('Enter a valid image URL (starting with http:// or https://)'); return; }
+    if(Number.isNaN(order)){ toast('Order must be a number'); return; }
+    const btn = $('#saveBanner',container); btn.disabled = true;
+    try{
+      if(editingId){
+        await db.collection(COL.banners).doc(editingId).update({
+          title, imageUrl, order, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        toast('Banner updated');
+      } else {
+        await db.collection(COL.banners).add({
+          title, imageUrl, order, active: true,
+          createdBy: CURRENT_USER.uid,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        toast('Banner added');
+      }
+      resetBnrForm();
+    }catch(e){
+      console.error(e);
+      toast('Could not save — check your connection.');
+    }
+    btn.disabled = false;
+  });
+
+  const listBox = $('#bannersAdminList', container);
+  const unsub = db.collection(COL.banners).orderBy('createdAt','desc').onSnapshot(snap=>{
+    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
+    listBox.innerHTML='';
+    if(!items.length){ listBox.innerHTML='<div class="empty-state">No banners yet.</div>'; return; }
+    items.forEach(b=>{
+      const card = el(`<div class="item-card">
+        <img src="${esc(b.imageUrl)}" alt="" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;display:block;margin-bottom:8px;background:var(--surface-2)">
+        <div class="item-top"><div class="item-info">
+          <div class="item-title">${esc(b.title||'Banner')}</div>
+          <div class="item-meta">Order: ${esc(String(b.order ?? 0))}</div>
+          <div class="item-badges">
+            <span class="badge ${b.active===false?'badge-muted':'badge-free'}">${b.active===false?'Inactive':'Active'}</span>
+            <span class="badge badge-muted">${fmtDate(b.createdAt)}</span>
+          </div>
+        </div></div>
+        <div class="item-actions">
+          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${b.active===false?'✅ Activate':'⏸ Deactivate'}</button>
+          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+        </div>
+      </div>`);
+      $all('button', card).forEach(btn2=> btn2.addEventListener('click', async ()=>{
+        if(btn2.dataset.act==='edit'){
+          editingId = b.id;
+          $('#bnrFormTitle', container).textContent = '✏️ Edit banner';
+          $('#bnrTitle', container).value = b.title||'';
+          $('#bnrImageUrl', container).value = b.imageUrl||'';
+          $('#bnrOrder', container).value = String(b.order ?? 0);
+          $('#saveBanner', container).textContent = '💾 Update banner';
+          $('#cancelEditBnr', container).style.display = '';
+        } else if(btn2.dataset.act==='toggle'){
+          try{
+            await db.collection(COL.banners).doc(b.id).update({ active: b.active===false, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            toast(b.active===false ? 'Activated' : 'Deactivated');
+          }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
+        } else if(btn2.dataset.act==='del'){
+          if(!confirm('Delete this banner? It will no longer show on the student dashboard. This does not affect students, enrollments, batches, content, results, payments, or announcements.')) return;
+          try{
+            await db.collection(COL.banners).doc(b.id).delete();
+            toast('Deleted');
+            if(editingId===b.id) resetBnrForm();
           }catch(err){ console.error(err); toast('Delete failed — check your connection.'); }
         }
       }));
