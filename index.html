@@ -1065,7 +1065,6 @@ async function doLogout(){
    the moment a student opened, say, the Classes tab.
    ================================================================ */
 let NOTIF_UNSUB = null;
-let NOTIF_META_UNSUB = null; // [NOTIF DEBUG - TEMP] separate diagnostic-only listener, see startAnnouncementNotifications()
 
 function notificationSupport(){ return 'Notification' in window; }
 
@@ -1089,120 +1088,42 @@ async function requestNotificationPermission(){
    announcement UI already covers that case, so a browser notification
    on top would just be a redundant duplicate, not a missed one.
 
-   PHASE H FIX: displays via the existing Service Worker registration's
-   registration.showNotification() instead of the page-level
+   Displays via the existing Service Worker registration's
+   registration.showNotification() rather than the page-level
    `new Notification(...)` constructor — Android Chrome / an installed
-   Android PWA rejects that constructor outright ("Illegal constructor"),
-   which is what the Phase H diagnostic traced this to. service-worker.js
-   itself is untouched — this only calls the standard showNotification()
-   API on the registration that index.html already creates via
-   navigator.serviceWorker.register('service-worker.js'). Click handling
-   is intentionally NOT wired up yet (that needs a notificationclick
-   listener inside service-worker.js itself, deferred to a later phase
-   per this fix's scope) — clicking the notification will simply do
-   nothing for now, same as before this fix in the case where it never
-   even displayed. */
-/* ================================================================
-   [NOTIF DEBUG - TEMP] Visible on-screen diagnostic panel
-   ----------------------------------------------------------------
-   Console output is impractical to check mid real-device test (no
-   cable/remote-debug session handy while the tab is backgrounded), so
-   this mirrors the exact same diagnostic messages into a small fixed
-   panel. Appended directly to document.body — a SIBLING of #app, not
-   a child of it — because renderScreen() does app.innerHTML='' on
-   every single screen/tab change (see renderScreen() above), which
-   would otherwise wipe this panel out on the very next navigation.
-   Purely observational: does not touch the Firestore listener,
-   dedup/baseline logic, or notification display logic — every call
-   site below still runs exactly the same as before, this just also
-   reports what happened. console.log is kept alongside it too, in
-   case remote devtools happen to be available. Diagnostic-only —
-   remove this whole block (and the notifDebugLog() calls that use it)
-   once real-device testing is done.
-   ================================================================ */
-const NOTIF_DEBUG_LOG = [];
-function notifDebugLog(msg){
-  console.log('[NOTIF DEBUG]', msg);
-  NOTIF_DEBUG_LOG.unshift(new Date().toLocaleTimeString() + '  ' + msg); // newest first — readable without scrolling on a phone
-  if(NOTIF_DEBUG_LOG.length > 30) NOTIF_DEBUG_LOG.length = 30;
-  renderNotifDebugPanel();
-}
-function renderNotifDebugPanel(){
-  let panel = document.getElementById('notifDebugPanel');
-  if(!panel){
-    panel = el(`
-      <div id="notifDebugPanel" style="position:fixed;left:0;right:0;bottom:0;z-index:99999;max-height:38vh;overflow-y:auto;
-        background:rgba(10,5,20,.94);color:#c9ffcf;font:10px/1.4 ui-monospace,Menlo,Consolas,monospace;
-        padding:6px 8px 8px;border-top:1px solid #3a2a5c;-webkit-overflow-scrolling:touch">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;position:sticky;top:0;background:rgba(10,5,20,.94);padding-bottom:4px">
-          <span style="color:#9b8ce8;font-weight:700;letter-spacing:.5px">NOTIF DEBUG</span>
-          <button id="notifDebugClearBtn" style="background:#3a2a5c;color:#f3f0fa;border:none;border-radius:6px;padding:3px 8px;font-size:10px">Clear Debug</button>
-        </div>
-        <div id="notifDebugList"></div>
-      </div>
-    `);
-    document.body.appendChild(panel); // sibling of #app — survives renderScreen()'s app.innerHTML=''
-    $('#notifDebugClearBtn', panel).addEventListener('click', ()=>{
-      NOTIF_DEBUG_LOG.length = 0;
-      renderNotifDebugPanel();
-    });
-  }
-  const list = $('#notifDebugList', panel);
-  list.innerHTML = NOTIF_DEBUG_LOG.length
-    ? NOTIF_DEBUG_LOG.map(l => '<div style="padding:2px 0;border-bottom:1px solid rgba(255,255,255,.06);word-break:break-word">'+esc(l)+'</div>').join('')
-    : '<div style="opacity:.5">(no messages yet)</div>';
-}
+   Android PWA rejects that constructor outright ("Illegal constructor").
+   service-worker.js itself is untouched — this only calls the standard
+   showNotification() API on the registration index.html already
+   creates via navigator.serviceWorker.register('service-worker.js').
+   Click handling is not wired up (would need a notificationclick
+   listener inside service-worker.js) — clicking a shown notification
+   currently does nothing.
 
+   Known limitation (confirmed via diagnostic testing, not a bug in
+   this function): Android may freeze a backgrounded tab's JavaScript
+   after a period, which pauses the Firestore listener below along with
+   everything else on the page. Without FCM/server-side push — out of
+   scope for this Spark-plan, no-backend project — there is no way to
+   keep that listener alive or wake it from here while the tab is
+   frozen; it resumes and catches up once the tab is foregrounded again. */
 function showAnnouncementNotification(a){
-  // [PHASE H DEBUG - TEMP] keeping these for this fix's own validation pass; strip once confirmed working on Android
-  console.log('[PHASE H DEBUG] showAnnouncementNotification() called for id=', a.id, {
-    supported: notificationSupport(),
-    permission: (typeof Notification!=='undefined') ? Notification.permission : '(no Notification global)',
-    visibilityState: document.visibilityState
-  });
-  notifDebugLog('showAnnouncementNotification() called: ' + a.id); // [NOTIF DEBUG - TEMP]
-  if(!notificationSupport() || Notification.permission !== 'granted'){
-    console.log('[PHASE H DEBUG] bailing: not supported or permission not granted');
-    notifDebugLog('skipped (permission not granted): ' + a.id + ' perm=' + ((typeof Notification!=='undefined') ? Notification.permission : 'n/a')); // [NOTIF DEBUG - TEMP]
-    return;
-  }
-  if(document.visibilityState === 'visible'){
-    console.log('[PHASE H DEBUG] bailing: document.visibilityState is "visible" (TMS tab is the foregrounded tab)');
-    notifDebugLog('skipped (visible/foreground): ' + a.id); // [NOTIF DEBUG - TEMP]
-    return;
-  }
+  if(!notificationSupport() || Notification.permission !== 'granted') return;
+  if(document.visibilityState === 'visible') return;
   if(!('serviceWorker' in navigator)){
     // Same fallback shape as the existing SW-registration guard elsewhere
     // in this file — a browser with Notification support but no Service
     // Worker support is effectively theoretical for this app's targets,
     // but bail cleanly rather than let navigator.serviceWorker throw.
-    console.log('[PHASE H DEBUG] bailing: no serviceWorker support in this browser');
-    notifDebugLog('skipped (no serviceWorker support): ' + a.id); // [NOTIF DEBUG - TEMP]
     return;
   }
   const title = a.title || 'Atomic Minds';
   const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
-  console.log('[PHASE H DEBUG] attempting registration.showNotification() now, title=', title, 'body=', body);
-  notifDebugLog('Waiting for serviceWorker.ready: ' + a.id); // [NOTIF DEBUG - TEMP]
   navigator.serviceWorker.ready
-    .then(registration => {
-      // [NOTIF DEBUG - TEMP]
-      notifDebugLog('ready resolved, active.state=' + (registration.active ? registration.active.state : 'NO ACTIVE WORKER') + ': ' + a.id);
-      notifDebugLog('Calling showNotification(): ' + a.id);
-      return registration.showNotification(title, {
-        body,
-        tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
-      });
-    })
-    .then(()=>{
-      console.log('[PHASE H DEBUG] registration.showNotification() succeeded');
-      notifDebugLog('showNotification() SUCCEEDED: ' + a.id); // [NOTIF DEBUG - TEMP]
-    })
-    .catch(error => {
-      console.log('[PHASE H DEBUG] registration.showNotification() THREW:', error && error.name, error && error.message);
-      console.error('[Phase H] Service Worker notification failed:', error);
-      notifDebugLog('showNotification() FAILED: ' + a.id + '  ' + (error && error.name) + ': ' + (error && error.message)); // [NOTIF DEBUG - TEMP]
-    });
+    .then(registration => registration.showNotification(title, {
+      body,
+      tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
+    }))
+    .catch(error => console.error('[notifications] could not show notification:', error));
 }
 
 /* Idempotent — safe to call from both doLogin() and a resumed session
@@ -1214,69 +1135,28 @@ function showAnnouncementNotification(a){
    mid-session (Settings tab) starts getting them immediately, with
    nothing here needing to notice that change or restart anything. */
 function startAnnouncementNotifications(){
-  if(NOTIF_UNSUB){
-    console.log('[PHASE H DEBUG] startAnnouncementNotifications() called but NOTIF_UNSUB already set — skipping duplicate attach'); // [PHASE H DEBUG - TEMP]
-    return;
-  }
-  console.log('[PHASE H DEBUG] startAnnouncementNotifications() called — resolving batch ids...'); // [PHASE H DEBUG - TEMP]
+  if(NOTIF_UNSUB) return;
   let seenIds = null; // null = first snapshot not processed yet
   syncAndGetMyBatchIds().then(ids=>{
-    console.log('[PHASE H DEBUG] syncAndGetMyBatchIds resolved:', ids, 'NOTIF_UNSUB already set?', !!NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
     if(!ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
     NOTIF_UNSUB = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
-      console.log('[PHASE H DEBUG] announcement snapshot received, count=', items.length, 'baseline already set?', seenIds!==null); // [PHASE H DEBUG - TEMP]
       if(seenIds === null){
         // First delivery after (re)attaching is the existing backlog, not
         // "new" — mark it all seen and never notify for it (Part G).
-        items.forEach(a=>{ // [NOTIF DEBUG - TEMP]
-          notifDebugLog('Announcement received: ' + a.id);
-          notifDebugLog('skipped (initial snapshot/baseline): ' + a.id);
-        });
         seenIds = new Set(items.map(a=>a.id));
-        console.log('[PHASE H DEBUG] baseline established with', seenIds.size, 'existing announcement id(s):', Array.from(seenIds)); // [PHASE H DEBUG - TEMP]
         return;
       }
       items.forEach(a=>{
-        notifDebugLog('Announcement received: ' + a.id); // [NOTIF DEBUG - TEMP]
-        if(seenIds.has(a.id)){
-          notifDebugLog('skipped (duplicate id): ' + a.id); // [NOTIF DEBUG - TEMP]
-          return; // already-known doc re-delivered — reconnect/metadata-only change/etc. (Part F)
-        }
-        console.log('[PHASE H DEBUG] NEW announcement id detected:', a.id, a.title); // [PHASE H DEBUG - TEMP]
-        notifDebugLog('Passed baseline/dedup check: ' + a.id); // [NOTIF DEBUG - TEMP]
+        if(seenIds.has(a.id)) return; // already-known doc re-delivered — reconnect/metadata-only change/etc. (Part F)
         seenIds.add(a.id);
         showAnnouncementNotification(a);
       });
     }, err=> console.error('[notifications] announcement listener failed:', err));
-    console.log('[PHASE H DEBUG] listenContentByBatchIds() attached, NOTIF_UNSUB is now', typeof NOTIF_UNSUB); // [PHASE H DEBUG - TEMP]
-
-    // [NOTIF DEBUG - TEMP] Snapshot-metadata diagnostic — a SEPARATE,
-    // independent raw onSnapshot listener, entirely additional to (not a
-    // modification of) the real notification listener above or of
-    // listenContentByBatchIds() itself, which is shared by every other
-    // tab in this app and is not touched here. Exists only to surface
-    // snapshot.metadata.fromCache / hasPendingWrites, which
-    // listenContentByBatchIds() discards after extracting .docs and so
-    // is otherwise unobservable. Mirrors the same query shape (batchId
-    // in the first up-to-30 ids, active==true) as the first — and for
-    // any real student, only — chunk that listener uses, so the metadata
-    // reported here is representative of the same data.
-    if(NOTIF_META_UNSUB){ try{ NOTIF_META_UNSUB(); }catch(e){} }
-    NOTIF_META_UNSUB = db.collection(COL.announcements)
-      .where('batchId','in', ids.slice(0,30))
-      .where('active','==', true)
-      .onSnapshot(snap=>{
-        notifDebugLog('SNAPSHOT META: fromCache=' + snap.metadata.fromCache + '  hasPendingWrites=' + snap.metadata.hasPendingWrites + '  docs=' + snap.size);
-      }, err=>{ console.error('[notifications] metadata diagnostic listener failed:', err); });
   });
 }
 
 function stopAnnouncementNotifications(){
-  if(NOTIF_UNSUB){
-    console.log('[PHASE H DEBUG] stopAnnouncementNotifications() — tearing down listener'); // [PHASE H DEBUG - TEMP]
-    try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null;
-  }
-  if(NOTIF_META_UNSUB){ try{ NOTIF_META_UNSUB(); }catch(e){} NOTIF_META_UNSUB = null; } // [NOTIF DEBUG - TEMP]
+  if(NOTIF_UNSUB){ try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null; }
 }
 
 /* ================================================================
@@ -1287,6 +1167,7 @@ auth.onAuthStateChanged(async (user) => {
   if(!user){
     CURRENT_PROFILE = null; CURRENT_ROLE = null;
     CURRENT_SESSION_ID = null;
+    STUDENT_SELECTED_BATCH_ID = null; // Phase I: never let one student's view-filter selection leak into the next login on this device
     stopAnnouncementNotifications();
     STATE.screen = 'auth';
     renderScreen();
@@ -1428,18 +1309,40 @@ function renderDashboardTab(container){
         <div style="font-size:17px;font-weight:700">Hi, ${esc(first)} 👋</div>
       </div>
       <div id="dashBatchLine" style="font-size:12px;color:var(--text-muted)">Loading your batch…</div>
+      <div id="dashBatchSelectArea"></div>
     </div>
   `));
   const batchLine = $('#dashBatchLine', container);
+  const selectArea = $('#dashBatchSelectArea', container);
   const availBox = el(`<div id="availBatchArea"></div>`);
   container.appendChild(availBox);
   const unsub = db.collection(COL.enrollments).where('studentId','==',CURRENT_USER.uid).onSnapshot(snap=>{
     const active = []; snap.forEach(d=>{ const e=d.data(); if(e.status==='active') active.push(e); });
     if(!active.length){
+      // No real batch — the only "batch" available is General Demo
+      // itself (every active student always has it), so that's what
+      // Classes/Notes/Tests/Calendar resolve to; see selectedContentIds().
       batchLine.textContent = 'No batch assigned yet' + (p.class?(' · Class '+p.class):'');
+      selectArea.innerHTML = '';
+      STUDENT_SELECTED_BATCH_ID = GENERAL_BATCH_ID;
       renderAvailableBatches(availBox);
+    } else if(active.length === 1){
+      // Exactly one real batch — auto-select it and skip the dropdown
+      // entirely (spec's "single-batch students, Option A"). General
+      // Demo stays merged in automatically, same as it always was.
+      batchLine.textContent = active[0].batchName + (p.class?(' · Class '+p.class):'');
+      selectArea.innerHTML = '';
+      STUDENT_SELECTED_BATCH_ID = active[0].batchId;
+      availBox.innerHTML = '';
     } else {
-      batchLine.textContent = active.map(e=>e.batchName).join(', ') + (p.class?(' · Class '+p.class):'');
+      // Two or more real batches — an actual choice exists, so show the
+      // "Select Batch" dropdown. General Demo is offered as an explicit
+      // extra option here, since this is the one case where isolating
+      // to just it is meaningfully different from picking a real batch.
+      batchLine.textContent = '';
+      const stillValid = active.some(e=> e.batchId === STUDENT_SELECTED_BATCH_ID) || STUDENT_SELECTED_BATCH_ID === GENERAL_BATCH_ID;
+      if(!stillValid) STUDENT_SELECTED_BATCH_ID = active[0].batchId;
+      renderBatchSelector(selectArea, active);
       availBox.innerHTML = '';
     }
   }, err=>{ console.error(err); batchLine.textContent = p.batch || 'No batch assigned yet'; });
@@ -1460,6 +1363,35 @@ function renderDashboardTab(container){
     renderScreen();
   });
   container.appendChild(links);
+}
+
+/* Renders the "Select Batch" dropdown (only ever called when the
+   student has 2+ real active batches — see renderDashboardTab()).
+   Purely a view/filter control: changing it only updates
+   STUDENT_SELECTED_BATCH_ID in memory. Classes/Notes/Tests/Calendar
+   each resolve their own content fresh via selectedContentIds() the
+   next time they render (every tab switch already fully re-renders —
+   see renderScreen()), so no cross-tab refresh call is needed here. */
+function renderBatchSelector(container, activeEnrollments){
+  container.innerHTML = '';
+  const field = el(`
+    <div class="field" style="margin-top:8px">
+      <label>Select Batch</label>
+      <select id="dashBatchSelect"></select>
+    </div>
+  `);
+  const select = $('#dashBatchSelect', field);
+  activeEnrollments.forEach(e=>{
+    select.appendChild(el(`<option value="${esc(e.batchId)}">${esc(e.batchName||e.batchId)}</option>`));
+  });
+  select.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">Free Demo — All Students</option>`));
+  select.value = STUDENT_SELECTED_BATCH_ID;
+  select.addEventListener('change', ()=>{
+    STUDENT_SELECTED_BATCH_ID = select.value;
+    const label = select.selectedOptions[0] ? select.selectedOptions[0].textContent : '';
+    toast('Now viewing: ' + label);
+  });
+  container.appendChild(field);
 }
 
 /* Shown on the Dashboard whenever the student has no active batch.
@@ -1538,6 +1470,54 @@ async function requestBatchJoin(batch, box){
    firestore.rules for the enforcement side of this.
    ================================================================ */
 const GENERAL_BATCH_ID = '__general__'; // sentinel batchId: content visible to every active student
+
+/* ================================================================
+   STUDENT DASHBOARD BATCH SELECTOR (Phase I)
+   ----------------------------------------------------------------
+   A student who is actively enrolled in more than one real batch can
+   now pick which ONE batch's Classes/Notes/Tests/Calendar they want to
+   view, instead of always seeing everything merged together.
+
+   selectedBatchId is a VIEW/FILTER state, never an authorization
+   field — it is never written to Firestore, never read by any
+   Security Rule, and lives only as this in-memory variable, reset on
+   every login/logout (see doLogin()/doLogout()/onAuthStateChanged()).
+   The actual authorization source remains exactly what it always
+   was: students/{uid}.activeBatchIds, resolved fresh via
+   syncAndGetMyBatchIds() (self-healing trim included, unchanged) and
+   re-checked by Firestore Rules against every document regardless of
+   what a query asks for. If this variable were tampered with in
+   DevTools to some batch the student isn't actually in,
+   selectedContentIds() below would still only ever narrow the REAL,
+   rule-verified id list down — it can never add an id that wasn't
+   already in it, so nothing changes about what a student can actually
+   read; Rules are, as always, the true enforcement.
+
+   Announcements and Browser Notifications intentionally do NOT use
+   any of this — both keep calling syncAndGetMyBatchIds() directly and
+   are completely unaffected by which batch is selected here, exactly
+   as the spec requires. */
+let STUDENT_SELECTED_BATCH_ID = null;
+
+/* Narrows the real, rule-verified batch id list down to just the
+   currently selected batch for content queries (Classes/Notes/Tests/
+   Calendar). General Demo is always layered on top of a real batch
+   selection, same as it implicitly always was before this phase — the
+   one exception is General Demo selected on its own, which shows only
+   itself, never merged with a real batch. Falls back to the full
+   `realIds` list (the exact pre-Phase-I behavior) whenever nothing
+   valid is selected yet, e.g. a student who opens Classes before ever
+   visiting the Dashboard — so content is never blank because of this
+   feature, only ever narrowed once there's something to narrow to. */
+function selectedContentIds(realIds){
+  if(!realIds || !realIds.length) return realIds || [];
+  if(STUDENT_SELECTED_BATCH_ID && realIds.includes(STUDENT_SELECTED_BATCH_ID)){
+    return STUDENT_SELECTED_BATCH_ID === GENERAL_BATCH_ID
+      ? [GENERAL_BATCH_ID]
+      : Array.from(new Set([STUDENT_SELECTED_BATCH_ID, GENERAL_BATCH_ID]));
+  }
+  return realIds;
+}
                                           // (must exactly match the literal used in firestore.rules)
 
 /* Given a student's enrollment documents, returns the Set of batchIds
@@ -1840,6 +1820,7 @@ function renderCalendarTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ grid.innerHTML=''; dayList.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const scopedIds = selectedContentIds(ids); // Phase I: narrow to the Dashboard's currently selected batch (+ General)
 
     // Phase F.2: the calendar now merges TWO live sources — one-time
     // classSchedules (unchanged) and recurring classScheduleRules, expanded
@@ -1874,12 +1855,12 @@ function renderCalendarTab(container){
       renderDaySchedule(dayList, merged);
     }
 
-    const unsub1 = listenScheduleByBatchIds(ids, firstDay, lastDay, items=>{
+    const unsub1 = listenScheduleByBatchIds(scopedIds, firstDay, lastDay, items=>{
       oneTimeItems = items; renderMerged();
     }, (err)=>{ loadError = err; renderMerged(); });
     trackUnsub(unsub1);
 
-    const unsub2 = listenContentByBatchIds(COL.classScheduleRules, ids, {field:'status', value:'active'}, items=>{
+    const unsub2 = listenContentByBatchIds(COL.classScheduleRules, scopedIds, {field:'status', value:'active'}, items=>{
       ruleDocs = items; renderMerged();
     }, (err)=>{ loadError = err; renderMerged(); });
     trackUnsub(unsub2);
@@ -1957,12 +1938,13 @@ function renderClassesTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    const scopedIds = selectedContentIds(ids); // Phase I: narrow to the Dashboard's currently selected batch (+ General)
     if(STATE.classesSubTab === 'recorded'){
-      const unsub = listenContentByBatchIds(COL.videos, ids, null, items=> renderVideoList(listBox, items),
+      const unsub = listenContentByBatchIds(COL.videos, scopedIds, null, items=> renderVideoList(listBox, items),
         ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
       trackUnsub(unsub);
     } else {
-      const unsub = listenContentByBatchIds(COL.liveClasses, ids, null, items=>{
+      const unsub = listenContentByBatchIds(COL.liveClasses, scopedIds, null, items=>{
         items.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
         renderLiveList(listBox, items);
       }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -2073,7 +2055,7 @@ function renderTestsTab(container){
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const unsub = listenContentByBatchIds(COL.tests, ids, null, items=>{
+    const unsub = listenContentByBatchIds(COL.tests, selectedContentIds(ids), null, items=>{
       allTests = items;
       applyFilter();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -2173,7 +2155,7 @@ function renderNotesTab(container){
   });
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
-    const unsub = listenContentByBatchIds(COL.notes, ids, null, items=>{
+    const unsub = listenContentByBatchIds(COL.notes, selectedContentIds(ids), null, items=>{
       allNotes = items;
       apply();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
