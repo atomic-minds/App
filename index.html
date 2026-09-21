@@ -292,9 +292,9 @@ mjx-container{color:var(--text) !important}
 /* -------- dashboard promotional banner carousel -------- */
 .banner-carousel-wrap{margin:0 0 12px}
 .banner-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;
-  -webkit-overflow-scrolling:touch;padding:2px 14px 4px;scrollbar-width:none}
+  -webkit-overflow-scrolling:touch;padding:2px 3px 6px;scrollbar-width:none}
 .banner-track::-webkit-scrollbar{display:none}
-.banner-slide{flex:0 0 88%;scroll-snap-align:center;aspect-ratio:16/9;border-radius:16px;
+.banner-slide{flex:0 0 100%;scroll-snap-align:center;aspect-ratio:16/9;border-radius:16px;
   overflow:hidden;box-shadow:0 8px 22px rgba(0,0,0,.35);background:var(--surface-2)}
 .banner-slide img{width:100%;height:100%;object-fit:cover;display:block}
 .banner-dots{display:flex;justify-content:center;gap:6px;margin-top:8px}
@@ -1379,6 +1379,27 @@ function renderDashboardTab(container){
   renderBannerCarousel(container);
 }
 
+/* Google Drive "share" links (drive.google.com/file/d/ID/view) are an
+   HTML viewer page, not raw image bytes — a plain <img src> pointing at
+   one simply never loads, which is exactly what was happening here even
+   though the link itself opens fine in a browser tab. Converts a Drive
+   share link (or a bare Drive file ID) to Drive's actual image-serving
+   host; anything that isn't a Drive link passes through unchanged, so
+   any other already-working direct image URL is untouched. Reuses
+   driveIdFromUrl() (already used for Notes' Drive links below) rather
+   than a second ID-parsing implementation. Called at render time, not
+   save time, so it applies retroactively to banners already saved with
+   a raw share link — no need to re-save existing banners. */
+function resolveImageUrl(url){
+  url = (url||'').trim();
+  if(!url) return url;
+  if(/drive\.google\.com/i.test(url)){
+    const id = driveIdFromUrl(url);
+    if(id) return 'https://lh3.googleusercontent.com/d/' + id;
+  }
+  return url;
+}
+
 /* ================================================================
    DASHBOARD PROMOTIONAL BANNER CAROUSEL
    ----------------------------------------------------------------
@@ -1428,7 +1449,7 @@ function renderBannerCarousel(container){
     if(!items.length){ wrap.style.display = 'none'; return; } // nothing to show — stay hidden rather than showing an empty frame
     wrap.style.display = '';
     items.forEach(b=>{
-      track.appendChild(el(`<div class="banner-slide"><img src="${esc(b.imageUrl)}" alt="" loading="lazy"></div>`));
+      track.appendChild(el(`<div class="banner-slide"><img src="${esc(resolveImageUrl(b.imageUrl))}" alt="" loading="lazy"></div>`));
     });
     if(items.length > 1){
       items.forEach((b,i)=> dotsBox.appendChild(el(`<span class="banner-dot${i===0?' active':''}" data-i="${i}"></span>`)));
@@ -3921,7 +3942,7 @@ function renderAdminBanners(container){
     if(!items.length){ listBox.innerHTML='<div class="empty-state">No banners yet.</div>'; return; }
     items.forEach(b=>{
       const card = el(`<div class="item-card">
-        <img src="${esc(b.imageUrl)}" alt="" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;display:block;margin-bottom:8px;background:var(--surface-2)">
+        <img src="${esc(resolveImageUrl(b.imageUrl))}" alt="" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;display:block;margin-bottom:8px;background:var(--surface-2)">
         <div class="item-top"><div class="item-info">
           <div class="item-title">${esc(b.title||'Banner')}</div>
           <div class="item-meta">Order: ${esc(String(b.order ?? 0))}</div>
