@@ -2516,7 +2516,7 @@ function renderProfileTab(container){
 }
 
 function buildTestHTML(meta, questions){
-  // Defends against a "</script>" substring anywhere in admin-entered
+  // Defends against a script-closing tag anywhere in admin-entered
   // text/JSON prematurely closing the <script> tag when the browser's
   // HTML parser scans this generated page — same escaping trick this
   // project already uses for the outer template's own closing tags.
