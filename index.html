@@ -1968,9 +1968,9 @@ function renderCalendarTab(container){
   const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
   const header = el(`<div class="cal-header">
-    <button class="btn-sm btn-ghost" id="calPrev">◀</button>
+    <button class="btn-sm btn-ghost" id="calPrev" aria-label="Previous month">${icon('arrow-left',16)}</button>
     <div class="cal-title">${monthNames[m]} ${y}</div>
-    <button class="btn-sm btn-ghost" id="calNext">▶</button>
+    <button class="btn-sm btn-ghost" id="calNext" aria-label="Next month">${icon('arrow-right',16)}</button>
   </div>`);
   container.appendChild(header);
   const grid = el(`<div id="calGrid"></div>`);
@@ -2177,7 +2177,7 @@ function openVideoPlayer(v){
     <div class="overlay open">
       <div class="sheet" style="padding:0;max-height:96vh">
         <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft)">
-          <button class="btn btn-ghost btn-sm" id="closePlayer">✕ Close</button>
+          <button class="btn btn-ghost btn-sm" id="closePlayer">${icon('close',15)}<span>Close</span></button>
           <div style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.title||'')}</div>
         </div>
         <div style="aspect-ratio:16/9;background:#000">
@@ -2277,7 +2277,7 @@ function openTestPlayer(t){
       <div style="background:#0d1117;width:100%;height:100%;display:flex;flex-direction:column;
         padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)">
         <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
-          <button class="btn btn-ghost btn-sm" id="closeTest">✕ Close</button>
+          <button class="btn btn-ghost btn-sm" id="closeTest">${icon('close',15)}<span>Close</span></button>
           <div style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title||'')}</div>
         </div>
         <iframe id="testIframe" style="width:100%;flex:1;border:none;background:#0d1117"></iframe>
@@ -2411,11 +2411,10 @@ function openPdfViewer(n){
     <div class="overlay open">
       <div class="sheet" style="padding:0;max-height:96vh;display:flex;flex-direction:column">
         <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft)">
-          <button class="btn btn-ghost btn-sm" id="closePdf">✕ Close</button>
+          <button class="btn btn-ghost btn-sm" id="closePdf">${icon('close',15)}<span>Close</span></button>
           <div style="font-size:12px;font-weight:600;flex:1">${esc(n.title||'')}</div>
         </div>
         <iframe style="width:100%;height:76vh;border:none;background:#fff" src="https://drive.google.com/file/d/${esc(n.driveId)}/preview" allow="autoplay"></iframe>
-        <div style="padding:10px 14px;font-size:11px;color:var(--text-dim)">View-only file, served from Google Drive. To fully disable downloading (not just hide the button), turn on "Viewers can't download/print/copy" in Drive's own share settings for this file.</div>
       </div>
     </div>`);
   document.body.appendChild(overlay);
@@ -2967,8 +2966,8 @@ function drawBatchJoinRequests(container){
           </div>
         </div>
         ${r.status==='pending' ? `<div class="item-actions">
-          <button class="btn-sm btn-success" data-act="approve">✅ Approve</button>
-          <button class="btn-sm btn-danger" data-act="reject">✕ Reject</button>
+          <button class="btn-sm btn-success" data-act="approve">${icon('check',15)}<span>Approve</span></button>
+          <button class="btn-sm btn-danger" data-act="reject">${icon('close',15)}<span>Reject</span></button>
         </div>` : ''}
       </div>`);
       $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
@@ -3097,13 +3096,13 @@ function openBatchDetail(batch){
       <div class="card-title">📚 ${esc(batch.name)}</div>
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${esc(batch.description||'No description')}</div>
       <div class="row2">
-        <button class="btn ${batch.status==='active'?'btn-danger':'btn-success'}" id="toggleBatchStatus">${batch.status==='active'?'📦 Archive batch':'✅ Reactivate batch'}</button>
-        <button class="btn btn-ghost" id="deleteBatchBtn">🗑 Delete batch</button>
+        <button class="btn ${batch.status==='active'?'btn-danger':'btn-success'}" id="toggleBatchStatus">${icon(batch.status==='active'?'ban':'check',16)}<span>${batch.status==='active'?'Archive batch':'Reactivate batch'}</span></button>
+        <button class="btn btn-ghost" id="deleteBatchBtn">${icon('trash',16)}<span>Delete batch</span></button>
       </div>
     </div>
     <div class="card">
       <div class="card-title">➕ Enroll a student</div>
-      <div class="search-input-wrap"><span class="si">🔍</span><input type="text" id="enrollSearch" placeholder="Search student by name or phone..."></div>
+      <div class="search-input-wrap"><span class="si">${icon('search')}</span><input type="text" id="enrollSearch" placeholder="Search student by name or phone..."></div>
       <div id="enrollSearchResults"></div>
     </div>
     <div class="card">
@@ -3182,8 +3181,8 @@ function openBatchDetail(batch){
         <div class="item-badges">${statusBadge}</div>
       </div>`);
       const actions = el(`<div class="item-actions">
-        <button class="btn-sm btn-ghost" data-act="toggle">${e.status==='active'?'⏸ Suspend':'▶ Reactivate'}</button>
-        <button class="btn-sm btn-danger" data-act="remove">🗑 Remove</button>
+        <button class="btn-sm btn-ghost" data-act="toggle">${icon(e.status==='active'?'pause':'play',15)}<span>${e.status==='active'?'Suspend':'Reactivate'}</span></button>
+        <button class="btn-sm btn-danger" data-act="remove">${icon('trash',15)}<span>Remove</span></button>
       </div>`);
       $all('button', actions).forEach(b=> b.addEventListener('click', async ()=>{
         try{
@@ -3451,7 +3450,7 @@ function openStudentDetail(s){
     }catch(e){
       console.error('[delete-student] failed:', e);
       toast('Could not delete student — check your connection and try again.');
-      btn.disabled = false; btn.textContent = '🗑️ Permanent Delete';
+      btn.disabled = false; btn.innerHTML = icon('trash',16)+'<span>Permanent Delete</span>';
     }
   });
 
@@ -3471,8 +3470,8 @@ function openStudentDetail(s){
         <div class="item-badges">${statusBadge}</div>
       </div>`);
       const actions = el(`<div class="item-actions">
-        <button class="btn-sm btn-ghost" data-act="toggle">${e.status==='active'?'⏸ Suspend':'▶ Reactivate'}</button>
-        <button class="btn-sm btn-danger" data-act="remove">🗑 Remove</button>
+        <button class="btn-sm btn-ghost" data-act="toggle">${icon(e.status==='active'?'pause':'play',15)}<span>${e.status==='active'?'Suspend':'Reactivate'}</span></button>
+        <button class="btn-sm btn-danger" data-act="remove">${icon('trash',15)}<span>Remove</span></button>
       </div>`);
       $all('button', actions).forEach(b=> b.addEventListener('click', async ()=>{
         try{
@@ -3622,7 +3621,7 @@ function drawRecordedForm(body){
           <div class="item-meta">${esc(v.subject||'')}${(v.batchName||v.batch)?(' · '+esc(v.batchName||v.batch)):''}</div>
           <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'Paid':'Free'}</span></div>
         </div></div>
-        <div class="item-actions"><button class="btn-sm btn-danger">🗑 Delete</button></div>
+        <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
       </div>`);
       $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.videos).doc(v.id).delete(); toast('Deleted'); });
       listBox.appendChild(card);
@@ -3681,8 +3680,8 @@ function drawLiveForm(body){
         </div></div>
         <div class="item-actions">
           <button class="btn-sm btn-ghost" data-act="live">🔴 Mark Live</button>
-          <button class="btn-sm btn-ghost" data-act="ended">✅ Mark Ended</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="ended">${icon('check',15)}<span>Mark Ended</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button',card).forEach(b=> b.addEventListener('click', async ()=>{
@@ -3726,8 +3725,8 @@ function renderAdminTests(container){
           <div class="item-badges"><span class="badge badge-accent">${esc(t.type)}</span>${t.access==='paid'?'<span class="badge badge-paid">Paid</span>':'<span class="badge badge-free">Free</span>'}</div>
         </div></div>
         <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="results">📊 Results</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="results">${icon('chart',15)}<span>Results</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button',card).forEach(b=>b.addEventListener('click', async ()=>{
@@ -3840,7 +3839,7 @@ function drawManualBuilder(body){
     questions.forEach((q,i)=>{
       const label = q.text ? (q.text.slice(0,40)+(q.text.length>40?'…':'')) : (q.imageUrl ? '[Image question]' : '[Untitled question]');
       const row = el(`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
-        <span>Q${i+1}. ${esc(label)}${q.imageUrl?' 🖼':''}</span><button class="btn-sm btn-danger">🗑</button></div>`);
+        <span>Q${i+1}. ${esc(label)}${q.imageUrl?' 🖼':''}</span><button class="btn-sm btn-danger" aria-label="Remove question">${icon('trash',14)}</button></div>`);
       $('button',row).addEventListener('click', ()=>{ questions.splice(i,1); refreshQList(); });
       box.appendChild(row);
     });
@@ -4000,7 +3999,7 @@ function renderAdminNotes(container){
             ${n.paidOnly?'<span class="badge badge-paid">Paid</span>':''}
           </div>
         </div></div>
-        <div class="item-actions"><button class="btn-sm btn-danger">🗑 Delete</button></div>
+        <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
       </div>`);
       $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.notes).doc(n.id).delete(); toast('Deleted'); });
       listBox.appendChild(card);
@@ -4099,9 +4098,9 @@ function renderAdminAnnouncements(container){
           </div>
         </div></div>
         <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
-          <button class="btn-sm btn-ghost" data-act="toggle">${a.active===false?'✅ Activate':'⏸ Deactivate'}</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${icon(a.active===false?'check':'ban',15)}<span>${a.active===false?'Activate':'Deactivate'}</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
@@ -4214,9 +4213,9 @@ function renderAdminBanners(container){
           </div>
         </div></div>
         <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
-          <button class="btn-sm btn-ghost" data-act="toggle">${b.active===false?'✅ Activate':'⏸ Deactivate'}</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${icon(b.active===false?'check':'ban',15)}<span>${b.active===false?'Activate':'Deactivate'}</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button', card).forEach(btn2=> btn2.addEventListener('click', async ()=>{
@@ -4470,9 +4469,9 @@ function renderAdminCalendar(container){
           </div>
         </div></div>
         <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
-          <button class="btn-sm btn-ghost" data-act="toggle">${cancelled?'✅ Restore':'🚫 Cancel'}</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${icon(cancelled?'check':'ban',15)}<span>${cancelled?'Restore':'Cancel'}</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
@@ -4538,16 +4537,16 @@ function renderAdminCalendar(container){
           </div>
         </div></div>
         <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="edit">✏️ Edit</button>
-          <button class="btn-sm btn-ghost" data-act="toggle">${paused?'▶️ Activate':'⏸️ Pause'}</button>
-          <button class="btn-sm btn-ghost" data-act="manage">📆 Manage a date</button>
-          <button class="btn-sm btn-danger" data-act="del">🗑 Delete</button>
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
+          <button class="btn-sm btn-ghost" data-act="toggle">${icon(paused?'play':'pause',15)}<span>${paused?'Activate':'Pause'}</span></button>
+          <button class="btn-sm btn-ghost" data-act="manage">${icon('calendar',15)}<span>Manage a date</span></button>
+          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
         <div class="rule-manage" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">
           <div class="field"><label>Date to change</label><input type="date" class="mgDate"></div>
           <div class="row2">
-            <button class="btn-sm btn-danger mgCancelDate">🚫 Cancel this date</button>
-            <button class="btn-sm btn-ghost mgShowReschedule">↻ Reschedule this date</button>
+            <button class="btn-sm btn-danger mgCancelDate">${icon('ban',15)}<span>Cancel this date</span></button>
+            <button class="btn-sm btn-ghost mgShowReschedule">${icon('refresh',15)}<span>Reschedule this date</span></button>
           </div>
           <div class="mgRescheduleFields" style="display:none;margin-top:8px">
             <div class="row2">
@@ -4555,7 +4554,7 @@ function renderAdminCalendar(container){
               <div class="field"><label>New start time</label><input type="time" class="mgNewStart"></div>
             </div>
             <div class="field"><label>New end time</label><input type="time" class="mgNewEnd"></div>
-            <button class="btn btn-primary btn-sm mgSaveReschedule">💾 Save reschedule</button>
+            <button class="btn btn-primary btn-sm mgSaveReschedule">${icon('check',15)}<span>Save reschedule</span></button>
           </div>
           <div class="mgExisting" style="margin-top:10px">
             ${overrideDates.length ? '<div class="field"><label>Existing exceptions</label></div>' : ''}
