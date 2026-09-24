@@ -243,6 +243,14 @@ mjx-container{color:var(--text) !important}
   padding:8px 14px 8px 10px;border-radius:20px;margin-bottom:14px}
 .back-btn:active{border-color:var(--accent);color:var(--text)}
 .back-btn svg{width:16px;height:16px;flex-shrink:0}
+/* Phase 1.1 — active test mode + persistent red warning */
+.overlay.tms-active{z-index:990}
+.tms-warn{position:absolute;inset:0;z-index:2000;background:rgba(70,0,0,.9);display:flex;align-items:center;justify-content:center;padding:20px}
+.tms-warn-card{background:#b91c1c;border:3px solid #fecaca;border-radius:16px;padding:22px 18px 18px;max-width:360px;width:100%;text-align:center;color:#fff;
+  box-shadow:0 0 0 6px rgba(239,68,68,.35),0 14px 44px rgba(0,0,0,.65)}
+.tms-warn-title{font-size:19px;font-weight:800;line-height:1.3;margin-bottom:12px;letter-spacing:.2px}
+.tms-warn-card p{font-size:15px;line-height:1.5;margin:0 0 8px}
+.tms-warn-ok{margin-top:12px;width:100%;padding:14px;border:none;border-radius:10px;background:#fff;color:#991b1b;font-size:16px;font-weight:800;cursor:pointer}
 .drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:150;opacity:0;pointer-events:none;
   transition:opacity .2s}
 .drawer-overlay.open{opacity:1;pointer-events:all}
@@ -627,6 +635,7 @@ function renderScreen(){
       app.appendChild(renderAdminLoginScreen());
     } else if(STATE.screen === 'student'){
       app.appendChild(renderStudentShell());
+      tmsMaybeAutoResume();   // Phase 1.1 — no-op unless this device holds an unfinished-attempt marker
     } else if(STATE.screen === 'admin'){
       app.appendChild(renderAdminShell());
     }
@@ -2459,10 +2468,10 @@ function practiceRecordToView(r, def){
 /* -------- full-screen frame shared by the player and the review -------- */
 function openFullscreenFrame(title, subtitle){
   const overlay = el(`
-    <div class="overlay open" style="align-items:stretch;justify-content:stretch">
+    <div class="overlay open" style="align-items:stretch;justify-content:stretch;overscroll-behavior:contain">
       <div style="background:#0d1117;width:100%;height:100%;display:flex;flex-direction:column;
         padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)">
-        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
+        <div class="tms-frame-bar" style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
           <button class="btn btn-ghost btn-sm" id="closeTest">${icon('close',15)}<span>Close</span></button>
           <div style="flex:1;min-width:0">
             <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title||'')}</div>
@@ -2473,12 +2482,19 @@ function openFullscreenFrame(title, subtitle){
       </div>
     </div>`);
   document.body.appendChild(overlay);
-  return { overlay, frame: $('#testIframe', overlay), closeBtn: $('#closeTest', overlay) };
+  return { overlay, frame: $('#testIframe', overlay), closeBtn: $('#closeTest', overlay), bar: $('.tms-frame-bar', overlay) };
 }
 
-/* -------- review (student history, fresh result, admin) -------- */
+/* -------- review (student history, fresh result, admin) --------
+   The answer key must never be reachable while a student has an attempt
+   running (Phase 1.1): student callers are refused while TMS_ACTIVE is
+   set for that test. Admin callers pass { admin:true }. */
 function openAttemptReview(t, def, view, opts){
   opts = opts || {};
+  if(!opts.admin && tmsReviewBlocked(t.id)){
+    toast('Review is locked while a test attempt is in progress.');
+    return;
+  }
   const sub = view.studentName ? ('Student: ' + view.studentName + ' · ' + view.label) : view.label;
   const { overlay, frame, closeBtn } = openFullscreenFrame(t.title || 'Test', sub);
   const boot = { mode:'review', review:view, durationMin:0, fullMarks:def.fullMarks, perCorrect:def.perCorrect, perWrong:def.perWrong };
@@ -2486,17 +2502,124 @@ function openAttemptReview(t, def, view, opts){
   closeBtn.addEventListener('click', () => { overlay.remove(); if(opts.onExit) opts.onExit(); });
 }
 
+/* ================================================================
+   ACTIVE TEST MODE (Phase 1.1) — Live / Regular attempts only
+   While an attempt is in progress:
+   - the player takes over the whole window (+ Fullscreen API where the
+     browser allows it) and the Close bar is hidden;
+   - the answer key (Review) is locked for that test;
+   - Back / Refresh are intercepted as far as browsers permit;
+   - leaving the page (visible -> hidden) is counted; each detected
+     leave shows a RED warning that stays until OK, and the
+     MAX_TEST_SCREEN_VIOLATIONS-th one really auto-submits.
+   Everything here is local (memory + localStorage). The ONLY Firestore
+   writes are still the Phase 1 lifecycle ones (create on Start, update
+   on Submit). Practice never enters this mode.
+   ================================================================ */
+const MAX_TEST_SCREEN_VIOLATIONS = 3;   // detected "left the test screen" events before auto-submit
+
+let TMS_ACTIVE = null;                  // { testId, attemptId } while an attempt is running in this page
+const tmsActiveKey = uid => 'tms:active:' + uid;
+function tmsReviewBlocked(testId){ return !!(TMS_ACTIVE && TMS_ACTIVE.testId === testId); }
+
+const TMS_WARN = {
+  first: { title:'⚠️ WARNING — TEST IN PROGRESS',
+           lines:['You left the test screen. Stay on the test.', 'Repeated violations will AUTO-SUBMIT your test.'] },
+  final: { title:'⚠️ FINAL WARNING',
+           lines:['You left the test screen again.', 'One more violation will AUTO-SUBMIT your test.'] },
+  auto:  { title:'⚠️ TEST AUTO-SUBMITTED',
+           lines:['Repeatedly leaving the test screen triggered automatic submission.'] },
+  back:  { title:'⚠️ TEST IN PROGRESS',
+           lines:['You are currently attempting a test.', 'Leaving this screen may interrupt your test.', 'Please stay on the test screen until you submit.'] }
+};
+const TMS_WARN_RANK = { back:1, first:2, final:3, auto:4 };
+
+// Red modal appended INSIDE the player overlay (so it also shows in fullscreen).
+// No timeout, no backdrop-dismiss: it only closes when the student taps OK.
+function tmsShowWarning(root, kind, onOk){
+  const cfg = TMS_WARN[kind];
+  const old = root.querySelector('.tms-warn');
+  if(old){
+    if((TMS_WARN_RANK[old.dataset.kind] || 0) > (TMS_WARN_RANK[kind] || 0)) return old;   // keep the more severe one
+    old.remove();
+  }
+  const m = el(`<div class="tms-warn" data-kind="${kind}" role="alertdialog" aria-modal="true">
+    <div class="tms-warn-card">
+      <div class="tms-warn-title">${esc(cfg.title)}</div>
+      ${cfg.lines.map(l => `<p>${esc(l)}</p>`).join('')}
+      <button class="tms-warn-ok" type="button">OK</button>
+    </div></div>`);
+  root.appendChild(m);
+  $('.tms-warn-ok', m).addEventListener('click', () => { m.remove(); if(onOk) onOk(kind); });
+  return m;
+}
+
+const tmsFsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+function tmsRequestFs(elm){
+  try{
+    const fn = elm.requestFullscreen || elm.webkitRequestFullscreen;
+    if(!fn) return false;
+    const p = fn.call(elm);
+    if(p && p.catch) p.catch(() => {});
+    return true;
+  }catch(e){ return false; }
+}
+function tmsExitFs(){
+  try{
+    if(!tmsFsElement()) return;
+    const fn = document.exitFullscreen || document.webkitExitFullscreen;
+    if(fn){ const p = fn.call(document); if(p && p.catch) p.catch(() => {}); }
+  }catch(e){}
+}
+
+// Auto-resume after refresh / browser or PWA reopen / re-login: if this
+// device has an active-attempt marker and Firestore says that attempt is
+// still in progress, drop the student straight back into it (no dashboard,
+// no review). The marker is only a pointer — Firestore stays authoritative.
+let _tmsAutoResumeUid = null;
+async function tmsMaybeAutoResume(){
+  if(!CURRENT_USER || _tmsAutoResumeUid === CURRENT_USER.uid) return;
+  _tmsAutoResumeUid = CURRENT_USER.uid;
+  if(TMS_ACTIVE) return;
+  const uid = CURRENT_USER.uid;
+  const marker = tmsLsGet(tmsActiveKey(uid));
+  if(!marker || !marker.attemptId || !marker.testId) return;
+  try{
+    const [aSnap, tSnap] = await Promise.all([
+      db.collection(COL.testAttempts).doc(marker.attemptId).get(),
+      db.collection(COL.tests).doc(marker.testId).get()
+    ]);
+    const a = aSnap.exists ? aSnap.data() : null;
+    if(!a || a.studentId !== uid || a.testId !== marker.testId || a.status !== 'in-progress'){ tmsLsDel(tmsActiveKey(uid)); return; }
+    if(!tSnap.exists) return;
+    const t = { id: tSnap.id, ...tSnap.data() };
+    const def = getTestDef(t);
+    if(!def.engine || testKind(t) === 'practice'){ tmsLsDel(tmsActiveKey(uid)); return; }
+    launchTestPlayer(t, def, {
+      attempt: { id: aSnap.id, ...a }, autoResumed: true,
+      onExit: () => { if(STATE.screen === 'student' && STATE.studentTab === 'tests') renderScreen(); }
+    });
+  }catch(e){ console.error('[test-engine] auto-resume failed:', e); }
+}
+
 /* -------- the attempt player (Live / Regular / Practice) -------- */
 function launchTestPlayer(t, def, opts){
   opts = opts || {};
+  if(TMS_ACTIVE) return false;                 // never two attempts at once
   const uid = CURRENT_USER.uid;
   const kind = testKind(t);
   const isPractice = kind === 'practice';
   const n = def.questions.length;
   const durationMin = isPractice ? 0 : def.durationMin;   // Practice is untimed (matches the builder's "Practice (no timer)")
   let attempt = opts.attempt || null;   // existing in-progress attempt (resume) or the one created on Start
-  let rt = null;                        // { startedMs, offset } — timer basis for the active attempt
-  let finished = false, submitting = false, finishedView = null;
+  let rt = null;                        // { startedMs, offset, violations } — timer basis + local violation counter
+  let finished = false, submitting = false, starting = false, finishedView = null;
+  let lastState = { cur:0, answers:new Array(n).fill(null), seen:new Array(n).fill(false) };
+  let pendingWarn = null;               // warning to show as soon as the page is visible again
+  let unloading = false, beforeUnloadAt = 0, fsWasIn = false, fsPending = false;
+  let guardDepth = 0, wl = null, wlWanted = false;
+  const lifeOff = [], activeOff = [];
+  const isActive = () => !!attempt && !finished && !isPractice;
 
   const number = attempt ? attempt.attemptNumber : (opts.attemptNumber || 1);
   const boot = {
@@ -2512,41 +2635,163 @@ function launchTestPlayer(t, def, opts){
     const ok = !!(local && local.attemptId === attempt.id && local.studentId === uid && local.testId === t.id &&
                   Array.isArray(local.answers) && local.answers.length === n);
     const startedMs = tsToMs(attempt.startedAt) || (ok && local.startedAtMs) || Date.now();
-    rt = { startedMs, offset: (ok && typeof local.clockOffsetMs === 'number') ? local.clockOffsetMs : 0 };
-    const answers = tmsCleanAnswers(ok ? local.answers : null, n);
-    boot.resume = {
-      answers, seen: tmsCleanSeen(ok ? local.seen : null, n, answers),
-      cur: ok && Number.isInteger(local.cur) ? Math.min(Math.max(local.cur,0), n-1) : 0,
-      deadlineMs: deadlineFor(), restored: ok
+    rt = {
+      startedMs, offset: (ok && typeof local.clockOffsetMs === 'number') ? local.clockOffsetMs : 0,
+      violations: (ok && Number.isInteger(local.violations) && local.violations > 0) ? local.violations : 0
     };
+    const answers = tmsCleanAnswers(ok ? local.answers : null, n);
+    lastState = {
+      cur: ok && Number.isInteger(local.cur) ? Math.min(Math.max(local.cur,0), n-1) : 0,
+      answers, seen: tmsCleanSeen(ok ? local.seen : null, n, answers)
+    };
+    boot.resume = { answers, seen: lastState.seen, cur: lastState.cur, deadlineMs: deadlineFor(), restored: ok,
+                    // violations already reached the limit before the page was reloaded/killed -> finish it now
+                    autoSubmit: rt.violations >= MAX_TEST_SCREEN_VIOLATIONS ? 'violations' : '' };
   }
 
-  const { overlay, frame, closeBtn } = openFullscreenFrame(t.title || 'Test', boot.attemptLabel);
+  const { overlay, frame, closeBtn, bar } = openFullscreenFrame(t.title || 'Test', boot.attemptLabel);
   frame.srcdoc = buildTestHTML(playerMeta(t, def, durationMin), def.questions, boot);
   const post = m => { try{ frame.contentWindow.postMessage(Object.assign({ tms:1 }, m), '*'); }catch(e){} };
+  const on = (bucket, target, type, fn, o) => { target.addEventListener(type, fn, o); bucket.push(() => target.removeEventListener(type, fn, o)); };
 
-  function saveLocal(m){
+  /* ---- local persistence (answers, seen, position, violation counter) ---- */
+  function writeLocal(){
     if(!attempt || finished) return;
-    const answers = tmsCleanAnswers(m.answers, n);
     tmsLsSet(tmsAttemptKey(attempt.id), {
       attemptId: attempt.id, studentId: uid, testId: t.id, attemptNumber: attempt.attemptNumber,
-      startedAtMs: rt.startedMs, clockOffsetMs: rt.offset,
-      cur: Number.isInteger(m.cur) ? m.cur : 0, answers, seen: tmsCleanSeen(m.seen, n, answers), savedAt: Date.now()
+      startedAtMs: rt.startedMs, clockOffsetMs: rt.offset, violations: rt.violations,
+      cur: lastState.cur, answers: lastState.answers, seen: lastState.seen, savedAt: Date.now()
     });
   }
+  function saveLocal(m){
+    const answers = tmsCleanAnswers(m.answers, n);
+    lastState = { cur: Number.isInteger(m.cur) ? m.cur : 0, answers, seen: tmsCleanSeen(m.seen, n, answers) };
+    writeLocal();
+  }
 
+  /* ---- warnings ---- */
+  const showWarn = kind => tmsShowWarning(overlay, kind, onWarnOk);
+  function onWarnOk(){
+    // OK is a user gesture: the best moment to re-enter fullscreen if it was dropped
+    if(isActive() && !tmsFsElement()) tmsRequestFs(overlay);
+  }
+
+  /* ---- Screen Wake Lock (best effort) ---- */
+  async function acquireWL(){
+    wlWanted = true;
+    try{
+      if(wl || !navigator.wakeLock) return;
+      const s = await navigator.wakeLock.request('screen');
+      if(!wlWanted){ try{ s.release(); }catch(e){} return; }
+      wl = s;
+      if(s.addEventListener) s.addEventListener('release', () => { if(wl === s) wl = null; });
+    }catch(e){ wl = null; }
+  }
+  function releaseWL(){
+    wlWanted = false;
+    try{ if(wl){ const s = wl; wl = null; s.release(); } }catch(e){}
+  }
+
+  /* ---- Back-button guard (History API) ---- */
+  function pushGuard(){ try{ history.pushState({ tmsGuard:true }, '', location.href); guardDepth++; }catch(e){} }
+  function unwindGuard(){
+    try{
+      const d = guardDepth; guardDepth = 0;
+      if(d > 0 && history.state && history.state.tmsGuard) history.go(-d);
+    }catch(e){}
+  }
+  function onPopState(){
+    if(!isActive()) return;
+    guardDepth = Math.max(0, guardDepth - 1);
+    pushGuard();            // put the guard entry back so the next Back is intercepted too
+    showWarn('back');
+  }
+
+  /* ---- Refresh / close protection ---- */
+  function onBeforeUnload(e){
+    if(!isActive()) return;
+    beforeUnloadAt = Date.now();
+    e.preventDefault();
+    e.returnValue = '';     // native browser confirmation — browsers do not allow custom text here
+    return '';
+  }
+  function onPageHide(e){ if(!e.persisted) unloading = true; }   // page really unloading (refresh/close): not a "leave"
+
+  /* ---- Leaving the test screen (Page Visibility) ---- */
+  function registerViolation(){
+    if(submitting || unloading || (Date.now() - beforeUnloadAt) < 2500) return;
+    rt.violations++;
+    writeLocal();                                   // survives refresh / resume of this attempt
+    if(rt.violations >= MAX_TEST_SCREEN_VIOLATIONS){
+      pendingWarn = 'auto';
+      post({ type:'autoSubmit', reason:'violations' });   // the player runs its normal submit flow
+    } else {
+      pendingWarn = (rt.violations === MAX_TEST_SCREEN_VIOLATIONS - 1) ? 'final' : 'first';
+    }
+  }
+  function onVisibility(){
+    if(document.visibilityState === 'hidden'){
+      if(isActive()) registerViolation();
+    } else {
+      unloading = false;                            // a page that is visible again was not really unloading (e.g. a bfcache-style pagehide)
+      if(isActive()) acquireWL();                   // wake lock is dropped by the browser when hidden
+      if(pendingWarn){ const k = pendingWarn; pendingWarn = null; showWarn(k); }
+    }
+  }
+  function onFsChange(){
+    const inFs = tmsFsElement() === overlay;
+    if(inFs){ fsWasIn = true; return; }
+    if(fsWasIn){ fsWasIn = false; if(isActive()) showWarn('back'); }   // fullscreen dropped (e.g. Android Back gesture) — not counted as a violation
+  }
+
+  /* ---- enter / leave active mode ---- */
+  function enterActiveMode(fsMode){          // 'now' = request fullscreen (inside a tap) · 'done' = already requested · 'wait' = request on the first tap
+    TMS_ACTIVE = { testId: t.id, attemptId: attempt.id };
+    tmsLsSet(tmsActiveKey(uid), { attemptId: attempt.id, testId: t.id });
+    overlay.classList.add('tms-active');
+    bar.style.display = 'none';                     // no Close button while the attempt is running
+    on(activeOff, window, 'beforeunload', onBeforeUnload);
+    on(activeOff, window, 'pagehide', onPageHide);
+    on(activeOff, window, 'popstate', onPopState);
+    pushGuard();
+    acquireWL();
+    if(fsMode === 'now') tmsRequestFs(overlay);
+    else if(fsMode === 'wait') fsPending = true;
+  }
+  function endActiveMode(){
+    activeOff.splice(0).forEach(f => f());
+    releaseWL();
+    tmsExitFs();
+    unwindGuard();
+    TMS_ACTIVE = null;
+    tmsLsDel(tmsActiveKey(uid));
+    overlay.classList.remove('tms-active');
+    bar.style.display = '';                         // Close is available again once the attempt is completed
+  }
+
+  on(lifeOff, document, 'visibilitychange', onVisibility);
+  on(lifeOff, document, 'fullscreenchange', onFsChange);
+  on(lifeOff, document, 'webkitfullscreenchange', onFsChange);
+
+  /* ---- messages from the player iframe ---- */
   async function handleStart(){
-    if(isPractice || attempt) return;
+    if(isPractice || attempt || starting) return;
+    starting = true;
+    tmsRequestFs(overlay);          // must happen synchronously inside the Start tap's user activation
     try{
       const res = await createNewAttempt(t, def);
-      attempt = res.attempt; rt = { startedMs: res.startedMs, offset: res.offset };
-      saveLocal({ cur:0, answers:new Array(n).fill(null), seen:[] });
+      attempt = res.attempt; rt = { startedMs: res.startedMs, offset: res.offset, violations: 0 };
+      writeLocal();
+      enterActiveMode('done');
       post({ type:'started', deadlineMs: deadlineFor() });
     }catch(err){
+      tmsExitFs();
       const msg = err.tmsCode === 'in-progress'
         ? 'You already have an unfinished attempt for this test. Close this screen and tap RESUME ATTEMPT.'
         : (err.tmsCode ? err.message : 'Could not start the test — check your connection and try again.');
       post({ type:'startFailed', message: msg });
+    }finally{
+      starting = false;
     }
   }
 
@@ -2572,6 +2817,7 @@ function launchTestPlayer(t, def, opts){
         tmsLsDel(tmsAttemptKey(attempt.id));
       }
       finished = true; finishedView = view;
+      if(!isPractice) endActiveMode();              // review unlocks, Close returns, wake lock + fullscreen released
       post({ type:'submitted', view });
     }catch(err){
       console.error('[test-engine] submit failed:', err);
@@ -2586,17 +2832,28 @@ function launchTestPlayer(t, def, opts){
     const m = e.data;
     if(!m || m.tms !== 1) return;
     if(m.type === 'start') handleStart();
-    else if(m.type === 'state') saveLocal(m);
+    else if(m.type === 'state') { if(attempt && !finished) saveLocal(m); }
     else if(m.type === 'submit') handleSubmit(m);
+    else if(m.type === 'gesture'){
+      // first tap after an auto-resume (no user activation at load): re-enter fullscreen + re-arm the Back guard
+      if(fsPending && isActive()){ fsPending = false; if(!tmsFsElement()) tmsRequestFs(overlay); pushGuard(); }
+    }
   }
-  window.addEventListener('message', onMsg);
+  on(lifeOff, window, 'message', onMsg);
 
   closeBtn.addEventListener('click', () => {
-    window.removeEventListener('message', onMsg);
+    if(isActive()){ showWarn('back'); return; }    // defence in depth: the bar is hidden while active
+    lifeOff.splice(0).forEach(f => f());
     overlay.remove();
-    if(attempt && !finished) toast('Attempt saved — resume it any time from the Tests tab on this device.');
     if(opts.onExit) opts.onExit();
   });
+
+  // Resuming an attempt: go straight back into active mode.
+  if(attempt){
+    enterActiveMode(opts.autoResumed ? 'wait' : 'now');   // a tap on RESUME can request fullscreen; auto-resume waits for the first tap
+    if(boot.resume.autoSubmit) showWarn('auto');
+  }
+  return true;
 }
 
 /* -------- per-test hub (attempts, history, start / resume / reattempt) -------- */
@@ -2612,6 +2869,12 @@ function openTestHub(t, ctx){
   document.body.appendChild(overlay);
   const body = $('#hubBody', overlay);
   $('#hubClose', overlay).addEventListener('click', () => overlay.remove());
+
+  // The hub is hidden (not just covered) while a player is open, and refreshed when it closes.
+  function play(o){
+    overlay.style.display = 'none';
+    if(!launchTestPlayer(t, def, Object.assign({ onExit: () => { overlay.style.display = ''; refresh(); } }, o))) overlay.style.display = '';
+  }
 
   function histRow(o){
     return `<div style="padding:9px 0;border-bottom:1px solid var(--border-soft)">
@@ -2652,11 +2915,11 @@ function openTestHub(t, ctx){
       if(inprog){
         html += `<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
           <div style="font-weight:700;font-size:14px;color:var(--warning)">You have an unfinished attempt. Resume?</div>
-          <div style="font-size:12px;color:var(--text-muted);margin:4px 0 10px;line-height:1.5">${esc(attemptLabel(inprog.attemptNumber))} (attempt ${inprog.attemptNumber}) is still in progress. Resuming does not use another attempt.</div>
+          <div style="font-size:12px;color:var(--text-muted);margin:4px 0 10px;line-height:1.5">${esc(attemptLabel(inprog.attemptNumber))} (attempt ${inprog.attemptNumber}) is still in progress. Resuming does not use another attempt. Review of earlier attempts stays locked until you submit it.</div>
           <button class="btn btn-primary" id="hubResume">RESUME ATTEMPT</button></div>`;
       }
       html += done.length
-        ? done.slice().reverse().map(a => histRow({ label:attemptLabel(a.attemptNumber), ms:tsToMs(a.submittedAt), score:a.score, total:a.total, correct:a.correct, wrong:a.wrong, skipped:a.skipped, rv:a.id })).join('')
+        ? done.slice().reverse().map(a => histRow({ label:attemptLabel(a.attemptNumber), ms:tsToMs(a.submittedAt), score:a.score, total:a.total, correct:a.correct, wrong:a.wrong, skipped:a.skipped, rv: inprog ? '' : a.id })).join('')
         : (inprog ? '' : `<div class="empty-state" style="padding:14px 0">You haven\u2019t attempted this test yet.</div>`);
       if(legacy.length){
         html += `<div class="card-title" style="margin:14px 0 4px;font-size:12px">Earlier results (before attempt history)</div>`;
@@ -2677,12 +2940,12 @@ function openTestHub(t, ctx){
 
     const startBtn = $('#hubStart', body);
     if(startBtn) startBtn.addEventListener('click', () => {
-      launchTestPlayer(t, def, { attemptNumber: isPractice ? 0 : list.length + 1, onExit: refresh });
+      play({ attemptNumber: isPractice ? 0 : list.length + 1 });
     });
     const resumeBtn = $('#hubResume', body);
     if(resumeBtn) resumeBtn.addEventListener('click', () => {
       const ip = list.find(a => a.status === 'in-progress');
-      launchTestPlayer(t, def, { attempt: ip, onExit: refresh });
+      play({ attempt: ip });
     });
     $all('[data-rv]', body).forEach(b => b.addEventListener('click', () => {
       const id = b.dataset.rv;
@@ -2691,6 +2954,7 @@ function openTestHub(t, ctx){
         if(r) openAttemptReview(t, def, practiceRecordToView(r, def));
       } else {
         const a = list.find(x => x.id === id);
+        if(list.some(x => x.status === 'in-progress')){ toast('Review is locked while a test attempt is in progress.'); return; }
         if(a) openAttemptReview(t, def, attemptToView(a, def, { studentName: (CURRENT_PROFILE && CURRENT_PROFILE.fullName) || '' }));
       }
     }));
@@ -3126,7 +3390,7 @@ function renderProfileTab(container){
    ================================================================ */
 const TMS_PLAYER_CSS = `
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{overflow-x:hidden}
+html,body{overflow-x:hidden;overscroll-behavior-y:contain}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;font-size:14px}
 #introScreen,#testScreen,#reviewScreen{padding:12px}
 .intro{display:flex;flex-direction:column;justify-content:center;min-height:100vh;text-align:center}
@@ -3264,7 +3528,7 @@ function tmsPlayerMain(){
   var mode = BOOT.mode || 'practice';
   var cur = 0, answers = [], seen = [];
   for(var z=0; z<N; z++){ answers.push(null); seen.push(false); }
-  var started = false, submitting = false, done = false, lastAuto = false, deadline = 0, timerHandle = null;
+  var started = false, submitting = false, done = false, lastAuto = false, lastReason = '', deadline = 0, timerHandle = null, lastGesture = 0;
 
   function $(id){ return document.getElementById(id); }
   function h(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -3353,7 +3617,7 @@ function tmsPlayerMain(){
   }
   function jump(i){ if(submitting||done) return; cur = i; renderQ(); }
   function updateHeader(){
-    $('hdrProgress').textContent = 'Question '+(cur+1)+' of '+N;
+    $('hdrProgress').textContent = 'Question '+(cur+1)+' of '+N+((mode === 'attempt' && BOOT.attemptLabel) ? ' \u00b7 '+BOOT.attemptLabel : '');
     $('progFill').style.width = Math.round(((cur+1)/N)*100)+'%';
   }
   function updateNav(){
@@ -3395,6 +3659,7 @@ function tmsPlayerMain(){
     $('testScreen').style.display = 'block';
     renderQ();
     startTicker();
+    if(o.autoSubmit) doSubmit(true, o.autoSubmit);   // e.g. the violation limit was already reached before a reload
   }
 
   /* ---------------- submit ---------------- */
@@ -3416,19 +3681,19 @@ function tmsPlayerMain(){
     $('busyModal').classList.add('open');
   }
   function hideBusy(){ $('busyModal').classList.remove('open'); }
-  function doSubmit(auto){
+  function doSubmit(auto, reason){
     if(submitting || done) return;          // double-submit guard
-    submitting = true; lastAuto = !!auto;
+    submitting = true; lastAuto = !!auto; lastReason = reason || '';
     if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
     $('confirmModal').classList.remove('open');
     $('mSubmitBtn').disabled = true;
-    showBusy(auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
+    showBusy(reason === 'violations' ? 'Test auto-submitted \u2014 submitting your answers\u2026' : auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
     post({ type:'submit', answers:answers, seen:seen, auto:!!auto });
   }
   function submitFailed(msg){
     submitting = false;
     $('mSubmitBtn').disabled = false;
-    var acts = [{ label:'Retry', cls:'mSubmit', fn:function(){ hideBusy(); doSubmit(lastAuto); } }];
+    var acts = [{ label:'Retry', cls:'mSubmit', fn:function(){ hideBusy(); doSubmit(lastAuto, lastReason); } }];
     if(!lastAuto) acts.unshift({ label:'Back to test', cls:'mCancel', fn:function(){ hideBusy(); startTicker(); } });
     showBusy(msg || 'Could not submit. Please try again.', acts);
   }
@@ -3520,6 +3785,12 @@ function tmsPlayerMain(){
       begin({ deadlineMs:0 });
     }
   };
+  // A tap inside the test lets the app re-enter fullscreen after a reload (browsers require a user gesture)
+  document.addEventListener('pointerup', function(){
+    if(!started || done || mode !== 'attempt') return;
+    var t = Date.now(); if(t - lastGesture < 1500) return;
+    lastGesture = t; post({ type:'gesture' });
+  }, true);
   window.addEventListener('message', function(e){
     if(e.source !== window.parent) return;
     var m = e.data; if(!m || m.tms !== 1) return;
@@ -3527,6 +3798,7 @@ function tmsPlayerMain(){
     else if(m.type === 'startFailed'){ $('startBtn').disabled = false; $('startBtn').textContent = 'Start Test'; $('startErr').textContent = m.message || 'Could not start.'; }
     else if(m.type === 'submitted'){ done = true; submitting = false; hideBusy(); renderReview(m.view, true); }
     else if(m.type === 'submitFailed'){ submitFailed(m.message); }
+    else if(m.type === 'autoSubmit'){ $('confirmModal').classList.remove('open'); doSubmit(true, m.reason); }
   });
 
   if(mode === 'review'){
@@ -3535,7 +3807,7 @@ function tmsPlayerMain(){
     renderIntro();
     if(BOOT.resume){
       begin(BOOT.resume);
-      flash(BOOT.resume.restored ? 'Attempt resumed \u2014 your answers and position were restored.'
+      if(!BOOT.resume.autoSubmit) flash(BOOT.resume.restored ? 'Attempt resumed \u2014 your answers and position were restored.'
                                  : 'Attempt resumed. Saved answers weren\u2019t found on this device, so you are continuing the same attempt with the timer running from its original start.');
     }
   }
@@ -4506,7 +4778,7 @@ function openTestResults(t){
           if(!snapA.exists || snapA.data().testId !== t.id){ toast('Attempt record not found.'); return; }
           const a = { id: snapA.id, ...snapA.data() };
           if(a.status !== 'completed'){ toast('This attempt has not been submitted.'); return; }
-          openAttemptReview(t, def, attemptToView(a, def, { studentName: r.studentName || '' }));
+          openAttemptReview(t, def, attemptToView(a, def, { studentName: r.studentName || '' }), { admin:true });
         }catch(e){
           console.error(e); toast('Could not load this attempt.');
         }finally{ rv.disabled = false; }
