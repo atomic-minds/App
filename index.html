@@ -635,7 +635,7 @@ function renderScreen(){
       app.appendChild(renderAdminLoginScreen());
     } else if(STATE.screen === 'student'){
       app.appendChild(renderStudentShell());
-      tmsMaybeAutoResume();   // Phase 1.1 — no-op unless this device holds an unfinished-attempt marker
+      tmsAfterLogin();   // Phase 1.2 — only a genuine page reload of an active test goes straight back into it
     } else if(STATE.screen === 'admin'){
       app.appendChild(renderAdminShell());
     }
@@ -1400,6 +1400,9 @@ function renderDashboardTab(container){
       <div id="dashBatchSelectArea"></div>
     </div>
   `));
+  const tmsResumeSlot = el(`<div></div>`);
+  container.appendChild(tmsResumeSlot);
+  tmsPaintResumeCard(tmsResumeSlot);   // Phase 1.2 — shows an unfinished Live/Regular attempt with a Resume Test button
   const batchLine = $('#dashBatchLine', container);
   const selectArea = $('#dashBatchSelectArea', container);
   const availBox = el(`<div id="availBatchArea"></div>`);
@@ -2468,8 +2471,8 @@ function practiceRecordToView(r, def){
 /* -------- full-screen frame shared by the player and the review -------- */
 function openFullscreenFrame(title, subtitle){
   const overlay = el(`
-    <div class="overlay open" style="align-items:stretch;justify-content:stretch;overscroll-behavior:contain">
-      <div style="background:#0d1117;width:100%;height:100%;display:flex;flex-direction:column;
+    <div class="overlay open" style="align-items:stretch;justify-content:stretch">
+      <div style="background:#0d1117;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;
         padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)">
         <div class="tms-frame-bar" style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
           <button class="btn btn-ghost btn-sm" id="closeTest">${icon('close',15)}<span>Close</span></button>
@@ -2478,7 +2481,7 @@ function openFullscreenFrame(title, subtitle){
             ${subtitle ? `<div style="font-size:10px;color:var(--text-dim)">${esc(subtitle)}</div>` : ''}
           </div>
         </div>
-        <iframe id="testIframe" style="width:100%;flex:1;border:none;background:#0d1117"></iframe>
+        <iframe id="testIframe" style="width:100%;flex:1 1 0;min-height:0;border:none;background:#0d1117"></iframe>
       </div>
     </div>`);
   document.body.appendChild(overlay);
@@ -2503,36 +2506,58 @@ function openAttemptReview(t, def, view, opts){
 }
 
 /* ================================================================
-   ACTIVE TEST MODE (Phase 1.1) — Live / Regular attempts only
+   ACTIVE TEST MODE (Phase 1.1, refined in 1.2) — Live / Regular attempts only
    While an attempt is in progress:
    - the player takes over the whole window (+ Fullscreen API where the
      browser allows it) and the Close bar is hidden;
-   - the answer key (Review) is locked for that test;
+   - the answer key (Review) is locked for that test — also while the
+     student is on the Dashboard with an unfinished attempt;
    - Back / Refresh are intercepted as far as browsers permit;
-   - leaving the page (visible -> hidden) is counted; each detected
-     leave shows a RED warning that stays until OK, and the
-     MAX_TEST_SCREEN_VIOLATIONS-th one really auto-submits.
+   - each time the student LEAVES the page and comes back (visible ->
+     hidden -> visible) that is ONE violation; a page reload is ONE
+     violation (detected on the next load via Navigation Timing
+     type === 'reload'). Each shows a RED warning that stays until OK,
+     and the MAX_TEST_SCREEN_VIOLATIONS-th one really auto-submits.
+   - closing the whole browser / PWA is NOT a violation: a violation is
+     only counted when the page comes back, and a fresh (non-reload)
+     load lands on the Dashboard with a "Resume Test" card.
    Everything here is local (memory + localStorage). The ONLY Firestore
    writes are still the Phase 1 lifecycle ones (create on Start, update
    on Submit). Practice never enters this mode.
    ================================================================ */
-const MAX_TEST_SCREEN_VIOLATIONS = 3;   // detected "left the test screen" events before auto-submit
+const MAX_TEST_SCREEN_VIOLATIONS = 4;   // detected "left the test screen" events; the 4th one auto-submits
 
 let TMS_ACTIVE = null;                  // { testId, attemptId } while an attempt is running in this page
-const tmsActiveKey = uid => 'tms:active:' + uid;
-function tmsReviewBlocked(testId){ return !!(TMS_ACTIVE && TMS_ACTIVE.testId === testId); }
+const TMS_SCREEN_KEY = 'tms:screen';    // { uid, attemptId, testId } while the test screen is showing; consumed by the next page load
+
+// The student's unfinished (in-progress) attempts: feeds the Dashboard "Resume Test" card and the review lock.
+let TMS_UNFINISHED = null;              // { uid, loaded, items:[{ attempt, test }] }
+function tmsReviewBlocked(testId){
+  if(TMS_ACTIVE && TMS_ACTIVE.testId === testId) return true;
+  return !!(TMS_UNFINISHED && CURRENT_USER && TMS_UNFINISHED.uid === CURRENT_USER.uid &&
+            TMS_UNFINISHED.items.some(i => i.attempt.testId === testId));
+}
 
 const TMS_WARN = {
   first: { title:'⚠️ WARNING — TEST IN PROGRESS',
-           lines:['You left the test screen. Stay on the test.', 'Repeated violations will AUTO-SUBMIT your test.'] },
-  final: { title:'⚠️ FINAL WARNING',
-           lines:['You left the test screen again.', 'One more violation will AUTO-SUBMIT your test.'] },
+           lines:['You left the test screen.', 'Stay on the test.', 'Repeated violations will AUTO-SUBMIT your test.'] },
+  again: { title:'⚠️ WARNING — TEST IN PROGRESS',
+           lines:['You left the test screen again.', 'Stay on the test.', 'Repeated violations will AUTO-SUBMIT your test.'] },
+  last:  { title:'⚠️ WARNING — TEST IN PROGRESS',
+           lines:['You left the test screen again.', MAX_TEST_SCREEN_VIOLATIONS + ' violations will AUTO-SUBMIT your test.'] },
   auto:  { title:'⚠️ TEST AUTO-SUBMITTED',
            lines:['Repeatedly leaving the test screen triggered automatic submission.'] },
   back:  { title:'⚠️ TEST IN PROGRESS',
            lines:['You are currently attempting a test.', 'Leaving this screen may interrupt your test.', 'Please stay on the test screen until you submit.'] }
 };
-const TMS_WARN_RANK = { back:1, first:2, final:3, auto:4 };
+const TMS_WARN_RANK = { back:1, first:2, again:3, last:4, auto:5 };
+// violation #1 -> first · #2.. -> again · the one before the limit -> last · the limit itself -> auto-submit
+function tmsViolationKind(count){
+  if(count >= MAX_TEST_SCREEN_VIOLATIONS) return 'auto';
+  if(count <= 1) return 'first';
+  if(count === MAX_TEST_SCREEN_VIOLATIONS - 1) return 'last';
+  return 'again';
+}
 
 // Red modal appended INSIDE the player overlay (so it also shows in fullscreen).
 // No timeout, no backdrop-dismiss: it only closes when the student taps OK.
@@ -2572,34 +2597,144 @@ function tmsExitFs(){
   }catch(e){}
 }
 
-// Auto-resume after refresh / browser or PWA reopen / re-login: if this
-// device has an active-attempt marker and Firestore says that attempt is
-// still in progress, drop the student straight back into it (no dashboard,
-// no review). The marker is only a pointer — Firestore stays authoritative.
-let _tmsAutoResumeUid = null;
-async function tmsMaybeAutoResume(){
-  if(!CURRENT_USER || _tmsAutoResumeUid === CURRENT_USER.uid) return;
-  _tmsAutoResumeUid = CURRENT_USER.uid;
-  if(TMS_ACTIVE) return;
-  const uid = CURRENT_USER.uid;
-  const marker = tmsLsGet(tmsActiveKey(uid));
-  if(!marker || !marker.attemptId || !marker.testId) return;
+/* -------- reload vs. close (what the previous page unload was) --------
+   Navigation Timing reports type === 'reload' only for a real refresh /
+   pull-to-refresh. Closing the browser or PWA and opening it again is a
+   fresh 'navigate' (or 'back_forward' for a restored tab) — so we can tell
+   the two apart on the NEXT load and never blame a student for closing the
+   app. If the browser can't tell, we do not guess: it is not a reload. */
+function tmsNavType(){
   try{
-    const [aSnap, tSnap] = await Promise.all([
-      db.collection(COL.testAttempts).doc(marker.attemptId).get(),
-      db.collection(COL.tests).doc(marker.testId).get()
-    ]);
-    const a = aSnap.exists ? aSnap.data() : null;
-    if(!a || a.studentId !== uid || a.testId !== marker.testId || a.status !== 'in-progress'){ tmsLsDel(tmsActiveKey(uid)); return; }
-    if(!tSnap.exists) return;
+    const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    if(nav && nav.type) return nav.type;
+    if(performance.navigation) return ['navigate','reload','back_forward','prerender'][performance.navigation.type] || 'unknown';
+  }catch(e){}
+  return 'unknown';
+}
+// The screen marker is consumed by every page load; it only turns into a pending
+// "reload violation" when that load really is a reload.
+let TMS_RELOAD_PENDING = (function(){
+  const f = tmsLsGet(TMS_SCREEN_KEY);
+  tmsLsDel(TMS_SCREEN_KEY);
+  return (f && f.uid && f.attemptId && f.testId && tmsNavType() === 'reload') ? f : null;
+})();
+
+/* -------- unfinished attempts (Dashboard "Resume Test" + review lock) -------- */
+async function tmsLoadUnfinished(force){
+  if(!CURRENT_USER) return [];
+  const uid = CURRENT_USER.uid;
+  if(!force && TMS_UNFINISHED && TMS_UNFINISHED.uid === uid && TMS_UNFINISHED.loaded) return TMS_UNFINISHED.items;
+  const snap = await db.collection(COL.testAttempts).where('studentId','==',uid).where('status','==','in-progress').get();
+  const attempts = [];
+  snap.forEach(d => attempts.push({ id:d.id, ...d.data() }));
+  attempts.sort((a,b) => (a.attemptNumber||0) - (b.attemptNumber||0));
+  const items = await Promise.all(attempts.map(async a => {
+    let test = null;
+    try{ const s = await db.collection(COL.tests).doc(a.testId).get(); if(s.exists) test = { id:s.id, ...s.data() }; }catch(e){}
+    return { attempt:a, test };
+  }));
+  TMS_UNFINISHED = { uid, loaded:true, items };
+  tmsPruneLocalAttempts(uid, new Set(attempts.map(a => a.id)));
+  return items;
+}
+function tmsUnfinishedBucket(){
+  const uid = CURRENT_USER.uid;
+  if(!TMS_UNFINISHED || TMS_UNFINISHED.uid !== uid) TMS_UNFINISHED = { uid, loaded:false, items:[] };
+  return TMS_UNFINISHED;
+}
+function tmsNoteUnfinished(attempt, test){
+  const b = tmsUnfinishedBucket();
+  b.items = b.items.filter(i => i.attempt.id !== attempt.id).concat([{ attempt, test }]);
+}
+function tmsDropUnfinished(attemptId){
+  if(TMS_UNFINISHED) TMS_UNFINISHED.items = TMS_UNFINISHED.items.filter(i => i.attempt.id !== attemptId);
+}
+// keep the cache in step with a fresh per-test attempt list (hub / Tests tab)
+function tmsSyncUnfinishedFromList(t, list){
+  const b = tmsUnfinishedBucket();
+  b.items = b.items.filter(i => i.attempt.testId !== t.id)
+                   .concat(list.filter(a => a.status === 'in-progress').map(a => ({ attempt:a, test:t })));
+}
+// A local resume record is only meaningful while its attempt is still in progress on the server.
+// Anything else (completed, or deleted by an admin) is dropped so stale state can never come back.
+function tmsPruneLocalAttempts(uid, keepIds){
+  try{
+    const base = 'tms:attempt:', prefix = base + uid + '_', dead = [];
+    for(let i = 0; i < localStorage.length; i++){
+      const k = localStorage.key(i);
+      if(!k || k.indexOf(prefix) !== 0) continue;
+      const id = k.slice(base.length);
+      if(keepIds.has(id) || (TMS_ACTIVE && TMS_ACTIVE.attemptId === id)) continue;
+      dead.push(k);
+    }
+    dead.forEach(k => localStorage.removeItem(k));
+  }catch(e){}
+}
+
+// Re-opens a specific unfinished attempt (Dashboard "Resume Test" button, or the
+// one-time return after a page reload). Firestore decides whether it still exists.
+async function tmsResumeAttemptById(attemptId, testId, extra){
+  if(!CURRENT_USER || TMS_ACTIVE) return false;
+  try{
+    const list = await fetchMyAttempts(testId);
+    const a = list.find(x => x.id === attemptId && x.status === 'in-progress');
+    if(!a){
+      tmsDropUnfinished(attemptId); tmsLsDel(tmsAttemptKey(attemptId));
+      toast('This attempt is no longer available.');
+      if(STATE.screen === 'student') renderScreen();
+      return false;
+    }
+    const tSnap = await db.collection(COL.tests).doc(testId).get();
+    if(!tSnap.exists) return false;
     const t = { id: tSnap.id, ...tSnap.data() };
     const def = getTestDef(t);
-    if(!def.engine || testKind(t) === 'practice'){ tmsLsDel(tmsActiveKey(uid)); return; }
-    launchTestPlayer(t, def, {
-      attempt: { id: aSnap.id, ...a }, autoResumed: true,
-      onExit: () => { if(STATE.screen === 'student' && STATE.studentTab === 'tests') renderScreen(); }
+    if(!def.engine || testKind(t) === 'practice') return false;
+    return launchTestPlayer(t, def, Object.assign({
+      attempt: a,
+      onExit: () => { if(STATE.screen === 'student') renderScreen(); }
+    }, extra || {}));
+  }catch(e){
+    console.error('[test-engine] resume failed:', e);
+    toast('Could not resume — check your connection and try again.');
+    return false;
+  }
+}
+
+// Dashboard card for an unfinished attempt. Reopening the app after closing it lands on the
+// Dashboard as normal; this card is how the student continues (never forced, never auto-submitted).
+function tmsPaintResumeCard(slot){
+  const paint = items => {
+    if(!slot.isConnected) return;
+    slot.innerHTML = '';
+    items.forEach(({ attempt, test }) => {
+      const card = el(`<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
+        <div style="font-weight:700;font-size:14px;color:var(--warning)">⏳ Unfinished test</div>
+        <div style="font-size:14px;font-weight:600;margin:4px 0 2px">${esc((test && test.title) || 'Your test')}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5">${esc(attemptLabel(attempt.attemptNumber))} · your answers and timer are kept.</div>
+        <button class="btn btn-primary" type="button" data-resume>Resume Test</button></div>`);
+      const btn = $('[data-resume]', card);
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const ok = await tmsResumeAttemptById(attempt.id, attempt.testId, {});
+        if(!ok) btn.disabled = false;
+      });
+      slot.appendChild(card);
     });
-  }catch(e){ console.error('[test-engine] auto-resume failed:', e); }
+  };
+  tmsLoadUnfinished(false).then(paint).catch(e => console.error('[test-engine] unfinished lookup failed:', e));
+}
+
+// Runs once per page load after sign-in. Only a genuine RELOAD of an active test goes straight back
+// into it (with that reload counted as a violation); a fresh open lands on the Dashboard.
+let _tmsAfterLoginUid = null;
+async function tmsAfterLogin(){
+  if(!CURRENT_USER || _tmsAfterLoginUid === CURRENT_USER.uid) return;
+  _tmsAfterLoginUid = CURRENT_USER.uid;
+  tmsLsDel('tms:active:' + CURRENT_USER.uid);      // leftover marker from Phase 1.1 (auto-resume) — no longer used
+  const p = TMS_RELOAD_PENDING; TMS_RELOAD_PENDING = null;
+  if(p && p.uid === CURRENT_USER.uid && !TMS_ACTIVE){
+    await tmsResumeAttemptById(p.attemptId, p.testId, { reloadViolation:true, autoResumed:true });
+  }
 }
 
 /* -------- the attempt player (Live / Regular / Practice) -------- */
@@ -2615,8 +2750,9 @@ function launchTestPlayer(t, def, opts){
   let rt = null;                        // { startedMs, offset, violations } — timer basis + local violation counter
   let finished = false, submitting = false, starting = false, finishedView = null;
   let lastState = { cur:0, answers:new Array(n).fill(null), seen:new Array(n).fill(false) };
-  let pendingWarn = null;               // warning to show as soon as the page is visible again
-  let unloading = false, beforeUnloadAt = 0, fsWasIn = false, fsPending = false;
+  let leftAt = 0;                       // set when the page goes hidden; the violation is counted when it comes back
+  let autoModalPending = false;         // show "TEST AUTO-SUBMITTED" once the auto-submit has really completed
+  let fsWasIn = false, fsPending = false;
   let guardDepth = 0, wl = null, wlWanted = false;
   const lifeOff = [], activeOff = [];
   const isActive = () => !!attempt && !finished && !isPractice;
@@ -2632,13 +2768,18 @@ function launchTestPlayer(t, def, opts){
 
   if(attempt){
     const local = tmsLsGet(tmsAttemptKey(attempt.id));
+    const serverStartMs = tsToMs(attempt.startedAt);
+    // Local state only belongs to THIS attempt if it was started at the same server time: an attempt an admin
+    // deleted and the student later restarted reuses the same document id, so the id alone is not enough.
     const ok = !!(local && local.attemptId === attempt.id && local.studentId === uid && local.testId === t.id &&
-                  Array.isArray(local.answers) && local.answers.length === n);
-    const startedMs = tsToMs(attempt.startedAt) || (ok && local.startedAtMs) || Date.now();
+                  Array.isArray(local.answers) && local.answers.length === n &&
+                  (serverStartMs == null || Math.abs((Number(local.startedAtMs) || 0) - serverStartMs) < 1000));
+    const startedMs = serverStartMs || (ok && local.startedAtMs) || Date.now();
     rt = {
       startedMs, offset: (ok && typeof local.clockOffsetMs === 'number') ? local.clockOffsetMs : 0,
       violations: (ok && Number.isInteger(local.violations) && local.violations > 0) ? local.violations : 0
     };
+    if(opts.reloadViolation) rt.violations++;      // the page was reloaded while the test was on screen: one violation
     const answers = tmsCleanAnswers(ok ? local.answers : null, n);
     lastState = {
       cur: ok && Number.isInteger(local.cur) ? Math.min(Math.max(local.cur,0), n-1) : 0,
@@ -2710,32 +2851,32 @@ function launchTestPlayer(t, def, opts){
   /* ---- Refresh / close protection ---- */
   function onBeforeUnload(e){
     if(!isActive()) return;
-    beforeUnloadAt = Date.now();
     e.preventDefault();
     e.returnValue = '';     // native browser confirmation — browsers do not allow custom text here
     return '';
   }
-  function onPageHide(e){ if(!e.persisted) unloading = true; }   // page really unloading (refresh/close): not a "leave"
 
-  /* ---- Leaving the test screen (Page Visibility) ---- */
+  /* ---- Leaving the test screen (Page Visibility) ----
+     One hidden -> visible round trip = ONE violation, counted when the page comes back. A page that is
+     hidden and never returns (browser / PWA closed, tab closed) is therefore never counted. */
   function registerViolation(){
-    if(submitting || unloading || (Date.now() - beforeUnloadAt) < 2500) return;
     rt.violations++;
     writeLocal();                                   // survives refresh / resume of this attempt
-    if(rt.violations >= MAX_TEST_SCREEN_VIOLATIONS){
-      pendingWarn = 'auto';
-      post({ type:'autoSubmit', reason:'violations' });   // the player runs its normal submit flow
-    } else {
-      pendingWarn = (rt.violations === MAX_TEST_SCREEN_VIOLATIONS - 1) ? 'final' : 'first';
-    }
+    if(rt.violations >= MAX_TEST_SCREEN_VIOLATIONS) triggerAutoSubmit();
+    else showWarn(tmsViolationKind(rt.violations));
+  }
+  function triggerAutoSubmit(){
+    autoModalPending = true;
+    post({ type:'autoSubmit', reason:'violations' });   // the player runs its normal submit flow
   }
   function onVisibility(){
     if(document.visibilityState === 'hidden'){
-      if(isActive()) registerViolation();
+      if(isActive() && !submitting && !leftAt) leftAt = Date.now();
     } else {
-      unloading = false;                            // a page that is visible again was not really unloading (e.g. a bfcache-style pagehide)
-      if(isActive()) acquireWL();                   // wake lock is dropped by the browser when hidden
-      if(pendingWarn){ const k = pendingWarn; pendingWarn = null; showWarn(k); }
+      const wasAway = leftAt; leftAt = 0;
+      if(!isActive()) return;
+      acquireWL();                                  // wake lock is dropped by the browser when hidden
+      if(wasAway && !submitting) registerViolation();
     }
   }
   function onFsChange(){
@@ -2747,11 +2888,10 @@ function launchTestPlayer(t, def, opts){
   /* ---- enter / leave active mode ---- */
   function enterActiveMode(fsMode){          // 'now' = request fullscreen (inside a tap) · 'done' = already requested · 'wait' = request on the first tap
     TMS_ACTIVE = { testId: t.id, attemptId: attempt.id };
-    tmsLsSet(tmsActiveKey(uid), { attemptId: attempt.id, testId: t.id });
+    tmsLsSet(TMS_SCREEN_KEY, { uid, attemptId: attempt.id, testId: t.id });   // consumed by the next page load (reload vs. close)
     overlay.classList.add('tms-active');
     bar.style.display = 'none';                     // no Close button while the attempt is running
     on(activeOff, window, 'beforeunload', onBeforeUnload);
-    on(activeOff, window, 'pagehide', onPageHide);
     on(activeOff, window, 'popstate', onPopState);
     pushGuard();
     acquireWL();
@@ -2764,7 +2904,7 @@ function launchTestPlayer(t, def, opts){
     tmsExitFs();
     unwindGuard();
     TMS_ACTIVE = null;
-    tmsLsDel(tmsActiveKey(uid));
+    tmsLsDel(TMS_SCREEN_KEY);
     overlay.classList.remove('tms-active');
     bar.style.display = '';                         // Close is available again once the attempt is completed
   }
@@ -2772,6 +2912,14 @@ function launchTestPlayer(t, def, opts){
   on(lifeOff, document, 'visibilitychange', onVisibility);
   on(lifeOff, document, 'fullscreenchange', onFsChange);
   on(lifeOff, document, 'webkitfullscreenchange', onFsChange);
+
+  // true only when the server positively confirms this attempt is not there any more
+  async function attemptIsGone(){
+    try{
+      const list = await fetchMyAttempts(t.id);
+      return !list.some(a => a.id === attempt.id && a.status === 'in-progress');
+    }catch(e){ return false; }
+  }
 
   /* ---- messages from the player iframe ---- */
   async function handleStart(){
@@ -2781,6 +2929,7 @@ function launchTestPlayer(t, def, opts){
     try{
       const res = await createNewAttempt(t, def);
       attempt = res.attempt; rt = { startedMs: res.startedMs, offset: res.offset, violations: 0 };
+      tmsNoteUnfinished(attempt, t);
       writeLocal();
       enterActiveMode('done');
       post({ type:'started', deadlineMs: deadlineFor() });
@@ -2817,11 +2966,20 @@ function launchTestPlayer(t, def, opts){
         tmsLsDel(tmsAttemptKey(attempt.id));
       }
       finished = true; finishedView = view;
-      if(!isPractice) endActiveMode();              // review unlocks, Close returns, wake lock + fullscreen released
+      if(!isPractice){ tmsDropUnfinished(attempt.id); endActiveMode(); }   // review unlocks, Close returns, wake lock + fullscreen released
       post({ type:'submitted', view });
+      if(autoModalPending){ autoModalPending = false; showWarn('auto'); }
     }catch(err){
       console.error('[test-engine] submit failed:', err);
-      post({ type:'submitFailed', message: (err && err.tmsCode) ? err.message : 'Could not submit — check your connection and try again. Your answers are safe on this device.' });
+      if(!isPractice && attempt && err && (err.tmsCode === 'missing' || err.code === 'permission-denied') && await attemptIsGone()){
+        // the attempt no longer exists on the server (an admin reset this student's history for the test)
+        finished = true; autoModalPending = false;
+        tmsLsDel(tmsAttemptKey(attempt.id)); tmsDropUnfinished(attempt.id);
+        endActiveMode();
+        post({ type:'attemptRemoved', message:'This attempt is no longer available. It may have been reset by your teacher. Tap Close to leave.' });
+      } else {
+        post({ type:'submitFailed', message: (err && err.tmsCode) ? err.message : 'Could not submit — check your connection and try again. Your answers are safe on this device.' });
+      }
     }finally{
       submitting = false;
     }
@@ -2850,8 +3008,11 @@ function launchTestPlayer(t, def, opts){
 
   // Resuming an attempt: go straight back into active mode.
   if(attempt){
-    enterActiveMode(opts.autoResumed ? 'wait' : 'now');   // a tap on RESUME can request fullscreen; auto-resume waits for the first tap
-    if(boot.resume.autoSubmit) showWarn('auto');
+    enterActiveMode(opts.autoResumed ? 'wait' : 'now');   // a tap on RESUME can request fullscreen; a reload-return waits for the first tap
+    tmsNoteUnfinished(attempt, t);
+    if(opts.reloadViolation) writeLocal();          // persist the +1 for the reload
+    if(boot.resume.autoSubmit) autoModalPending = true;   // the player submits by itself (violation limit reached)
+    else if(opts.reloadViolation) showWarn(tmsViolationKind(rt.violations));
   }
   return true;
 }
@@ -2965,6 +3126,7 @@ function openTestHub(t, ctx){
     try{
       const list = await fetchMyAttempts(t.id);      // fresh from the server — Firestore is authoritative
       ctx.setAttempts(t.id, list);
+      tmsSyncUnfinishedFromList(t, list);
       paint(list);
     }catch(e){
       console.error('[test-engine] hub load failed:', e);
@@ -3390,8 +3552,19 @@ function renderProfileTab(container){
    ================================================================ */
 const TMS_PLAYER_CSS = `
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{overflow-x:hidden;overscroll-behavior-y:contain}
-body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;font-size:14px}
+/* Scrolling: the document (html) is the ONE vertical scroller. body must not become a scroll container
+   (overflow-x:hidden on body made it one, and overscroll-behavior on it then blocked scrolling entirely),
+   so horizontal overflow is clipped without creating a scroll container and content is kept inside the width. */
+html{overscroll-behavior-y:contain}
+body{overflow-x:clip;font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;font-size:14px;overflow-wrap:break-word}
+@supports not (overflow-x:clip){body{overflow-x:hidden}}
+img,svg,video,canvas{max-width:100%}
+img,video,canvas{height:auto}
+table{display:block;max-width:100%;overflow-x:auto}
+pre{max-width:100%;overflow-x:auto;white-space:pre-wrap}
+mjx-container{max-width:100%}
+mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
+.q-text,.otext,.explain-box,.opt>div:not(.key){min-width:0;overflow-wrap:anywhere}
 #introScreen,#testScreen,#reviewScreen{padding:12px}
 .intro{display:flex;flex-direction:column;justify-content:center;min-height:100vh;text-align:center}
 .intro h1{font-size:20px;margin-bottom:6px}
@@ -3422,11 +3595,11 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 .q-text{font-size:14px;margin-bottom:10px;line-height:1.6}
 .q-text img{max-width:100%;border-radius:6px;margin:6px 0}
 .q-image{margin:10px 0}
-.q-image img{max-width:100%;border-radius:8px;display:block}
+.q-image img{max-width:100%;height:auto;border-radius:8px;display:block}
 .q-image .imgerr{font-size:12px;color:#ef4444;padding:10px;background:#1c1116;border-radius:8px}
 .opts{margin-top:4px}
-.opts.layout-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.opts.layout-h{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.opts.layout-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.opts.layout-h{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .opts.layout-v{display:flex;flex-direction:column;gap:8px}
 .opt{display:flex;gap:8px;align-items:center;padding:9px 10px;border:1px solid #30363d;border-radius:8px;cursor:pointer}
 .opt.sel{border-color:#7f77dd;background:rgba(127,119,221,.15)}
@@ -3466,9 +3639,9 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 .explain-box b{display:block;font-size:11px;color:#8b949e;margin-bottom:3px}
 .explain-box img{max-width:100%;border-radius:6px;margin:6px 0}
 .explain-link{color:#7f77dd;font-size:12px;display:inline-block;margin-top:4px}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:50;padding:20px;overflow-y:auto}
 .modal-bg.open{display:flex}
-.modal-card{background:#161b22;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center}
+.modal-card{background:#161b22;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center;margin:auto}
 .modal-card p{font-size:13px;color:#c9d1d9;line-height:1.6;margin-bottom:16px}
 .modal-actions{display:flex;gap:8px}
 .modal-actions button{flex:1;padding:10px;border-radius:8px;border:none;font-weight:700;font-size:13px;cursor:pointer}
@@ -3687,7 +3860,7 @@ function tmsPlayerMain(){
     if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
     $('confirmModal').classList.remove('open');
     $('mSubmitBtn').disabled = true;
-    showBusy(reason === 'violations' ? 'Test auto-submitted \u2014 submitting your answers\u2026' : auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
+    showBusy(reason === 'violations' ? 'Auto-submitting your test\u2026' : auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
     post({ type:'submit', answers:answers, seen:seen, auto:!!auto });
   }
   function submitFailed(msg){
@@ -3798,6 +3971,7 @@ function tmsPlayerMain(){
     else if(m.type === 'startFailed'){ $('startBtn').disabled = false; $('startBtn').textContent = 'Start Test'; $('startErr').textContent = m.message || 'Could not start.'; }
     else if(m.type === 'submitted'){ done = true; submitting = false; hideBusy(); renderReview(m.view, true); }
     else if(m.type === 'submitFailed'){ submitFailed(m.message); }
+    else if(m.type === 'attemptRemoved'){ submitting = false; done = true; if(timerHandle){ clearInterval(timerHandle); timerHandle = null; } showBusy(m.message || 'This attempt is no longer available.'); }
     else if(m.type === 'autoSubmit'){ $('confirmModal').classList.remove('open'); doSubmit(true, m.reason); }
   });
 
@@ -4744,6 +4918,44 @@ function renderAdminTests(container){
   trackUnsub(unsub);
 }
 
+/* Admin confirmation sheet — exact wording + explicit Cancel / confirm buttons (a stray tap does nothing). */
+function adminConfirmSheet(o){
+  return new Promise(resolve => {
+    const ov = el(`<div class="overlay open" style="align-items:center;z-index:1200"><div class="sheet" style="border-radius:16px;max-width:360px;padding:20px 18px;transform:none">
+      <div style="font-size:15px;font-weight:700;line-height:1.4;margin-bottom:10px">${esc(o.title)}</div>
+      ${(o.lines||[]).map(l => `<div style="font-size:13px;color:var(--text-muted);line-height:1.5;margin-bottom:8px">${esc(l)}</div>`).join('')}
+      ${o.warn ? `<div class="auth-error" style="display:block;margin:10px 0">${esc(o.warn)}</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn btn-ghost" type="button" data-no>${esc(o.cancel || 'Cancel')}</button>
+        <button class="btn btn-danger" type="button" data-yes>${esc(o.confirm || 'Confirm')}</button>
+      </div></div></div>`);
+    document.body.appendChild(ov);
+    const done = v => { ov.remove(); resolve(v); };
+    $('[data-no]', ov).addEventListener('click', () => done(false));
+    $('[data-yes]', ov).addEventListener('click', () => done(true));
+  });
+}
+
+/* Admin-only: remove ONE student's whole attempt history for ONE test — every testAttempts document
+   (including an unfinished one) and every testResults document for that student + test. Nothing else:
+   not the test definition, not other students, not other tests. Firestore rules only allow admins to delete these. */
+async function adminDeleteTestHistory(t, studentId){
+  if(!t || !t.id || !studentId) throw new Error('Missing test or student');
+  const [aSnap, rSnap] = await Promise.all([
+    db.collection(COL.testAttempts).where('studentId','==',studentId).where('testId','==',t.id).get(),
+    db.collection(COL.testResults).where('studentId','==',studentId).where('testId','==',t.id).get()
+  ]);
+  const refs = []; let attempts = 0, results = 0;
+  aSnap.forEach(d => { const x = d.data(); if(x.studentId === studentId && x.testId === t.id){ refs.push(d.ref); attempts++; } });
+  rSnap.forEach(d => { const x = d.data(); if(x.studentId === studentId && x.testId === t.id){ refs.push(d.ref); results++; } });
+  for(let i = 0; i < refs.length; i += 450){
+    const b = db.batch();
+    refs.slice(i, i + 450).forEach(r => b.delete(r));
+    await b.commit();
+  }
+  return { attempts, results };
+}
+
 function openTestResults(t){
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeRes">✕</button><div style="clear:both"></div>
@@ -4752,40 +4964,89 @@ function openTestResults(t){
   </div></div>`);
   document.body.appendChild(overlay);
   $('#closeRes', overlay).addEventListener('click', ()=> overlay.remove());
-  db.collection(COL.testResults).where('testId','==',t.id).get().then(snap=>{
-    const box = $('#resList', overlay);
-    if(snap.empty){ box.innerHTML = '<div class="empty-state">No attempts yet.</div>'; return; }
-    let rows = []; snap.forEach(d=> rows.push(d.data()));
-    rows.sort((a,b)=> b.score - a.score);
-    box.innerHTML='';
-    rows.forEach((r,i)=>{
-      const canReview = !!r.attemptId;   // rows from before Phase 1 have no attempt record to review
-      const row = el(`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
-        <div style="min-width:0;flex:1">
-          <div>#${i+1} ${esc(r.studentName||'Student')}${r.attemptNumber?` <span class="badge badge-muted">${esc(attemptLabel(r.attemptNumber))}</span>`:''}</div>
-          <div style="font-size:11px;color:var(--text-dim)">${esc(fmtDateTime(tsToMs(r.submittedAt)))}${canReview?` · ✓ ${esc(r.correct)} · ✗ ${esc(r.wrong)} · — ${esc(r.skipped)}`:''}</div>
+  const box = $('#resList', overlay);
+
+  async function load(){
+    box.innerHTML = '<div class="spinner"></div>';
+    let aSnap, rSnap;
+    try{
+      [aSnap, rSnap] = await Promise.all([
+        db.collection(COL.testAttempts).where('testId','==',t.id).get(),
+        db.collection(COL.testResults).where('testId','==',t.id).get()
+      ]);
+    }catch(e){ console.error(e); box.innerHTML = '<div class="empty-state">Could not load results.</div>'; return; }
+
+    // one group per student: their attempt documents (any status) + pre-Phase-1 result rows
+    const groups = new Map();
+    const grp = id => { if(!groups.has(id)) groups.set(id, { studentId:id, name:'', attempts:[], legacy:[] }); return groups.get(id); };
+    aSnap.forEach(d => { const a = { id:d.id, ...d.data() }; grp(a.studentId).attempts.push(a); });
+    rSnap.forEach(d => { const r = d.data(); const g = grp(r.studentId); if(r.studentName) g.name = r.studentName; if(!r.attemptId) g.legacy.push(r); });
+    // a student who only has an unfinished attempt has no result row yet (so no name on file)
+    await Promise.all([...groups.values()].filter(g => !g.name).map(async g => {
+      try{ const s = await db.collection(COL.students).doc(g.studentId).get(); g.name = s.exists ? (s.data().fullName || '') : ''; }catch(e){}
+    }));
+    if(!groups.size){ box.innerHTML = '<div class="empty-state">No attempts yet.</div>'; return; }
+
+    const scoreRows = g => g.attempts.filter(a => a.status === 'completed').concat(g.legacy);
+    const best = g => scoreRows(g).reduce((m,r) => Math.max(m, Number(r.score) || 0), -Infinity);
+    const list = [...groups.values()].sort((a,b) => best(b) - best(a));
+    box.innerHTML = '';
+    list.forEach((g, i) => {
+      g.attempts.sort((a,b) => (a.attemptNumber||0) - (b.attemptNumber||0));
+      const done = scoreRows(g), b = best(g), inprog = g.attempts.some(a => a.status === 'in-progress');
+      const bestTxt = done.length ? `best ${fmtMarks(b)}/${fmtMarks(done.find(r => (Number(r.score)||0) === b).total)}` : 'no submitted attempt';
+      const card = el(`<div class="card" style="padding:12px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div style="min-width:0"><div style="font-weight:700;font-size:13px">#${i+1} ${esc(g.name || 'Student')}</div>
+            <div style="font-size:11px;color:var(--text-dim)">${g.attempts.length + g.legacy.length} record${(g.attempts.length + g.legacy.length)===1?'':'s'} · ${esc(bestTxt)}${inprog ? ' · <span style="color:var(--warning)">unfinished attempt</span>' : ''}</div></div>
+          <button class="btn-sm btn-danger" type="button" data-del style="white-space:nowrap;flex-shrink:0">${icon('trash',15)}<span>Delete History</span></button>
         </div>
-        <span style="font-weight:700">${esc(fmtMarks(r.score))}/${esc(fmtMarks(r.total))}</span>
-        ${canReview?`<button class="btn-sm btn-ghost" data-rv="1">Review</button>`:''}
-      </div>`);
-      const rv = $('[data-rv]', row);
-      if(rv) rv.addEventListener('click', async ()=>{
-        rv.disabled = true;
-        try{
-          const def = getTestDef(t);
-          if(!def.engine){ toast('Review isn\u2019t available for this test.'); return; }
-          const snapA = await db.collection(COL.testAttempts).doc(r.attemptId).get();
-          if(!snapA.exists || snapA.data().testId !== t.id){ toast('Attempt record not found.'); return; }
-          const a = { id: snapA.id, ...snapA.data() };
-          if(a.status !== 'completed'){ toast('This attempt has not been submitted.'); return; }
-          openAttemptReview(t, def, attemptToView(a, def, { studentName: r.studentName || '' }), { admin:true });
-        }catch(e){
-          console.error(e); toast('Could not load this attempt.');
-        }finally{ rv.disabled = false; }
+        <div data-rows></div></div>`);
+      const rows = $('[data-rows]', card);
+      const rowHTML = (label, sub, right, review) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border-soft);font-size:12px">
+          <div style="min-width:0;flex:1"><div style="font-weight:600">${esc(label)}</div><div style="font-size:11px;color:var(--text-dim)">${sub}</div></div>
+          <span style="font-weight:700">${right}</span>${review ? '<button class="btn-sm btn-ghost" type="button" data-rv>Review</button>' : ''}</div>`;
+      g.attempts.forEach(a => {
+        let node;
+        if(a.status === 'completed'){
+          node = el(rowHTML(attemptLabel(a.attemptNumber),
+            `${esc(fmtDateTime(tsToMs(a.submittedAt)))} · ✓ ${esc(a.correct)} · ✗ ${esc(a.wrong)} · — ${esc(a.skipped)}`,
+            `${esc(fmtMarks(a.score))}/${esc(fmtMarks(a.total))}`, true));
+          $('[data-rv]', node).addEventListener('click', () => {
+            const def = getTestDef(t);
+            if(!def.engine){ toast('Review isn\u2019t available for this test.'); return; }
+            openAttemptReview(t, def, attemptToView(a, def, { studentName: g.name }), { admin:true });
+          });
+        } else {
+          node = el(rowHTML(attemptLabel(a.attemptNumber), `In progress · started ${esc(fmtDateTime(tsToMs(a.startedAt)))}`, '—', false));
+        }
+        rows.appendChild(node);
       });
-      box.appendChild(row);
+      g.legacy.forEach(r => rows.appendChild(el(rowHTML('Earlier result', esc(fmtDateTime(tsToMs(r.submittedAt))), `${esc(fmtMarks(r.score))}/${esc(fmtMarks(r.total))}`, false))));
+      $('[data-del]', card).addEventListener('click', async ev => {
+        const btn = ev.currentTarget;
+        const ok = await adminConfirmSheet({
+          title: 'Delete all attempt history for this student and this test?',
+          lines: [ `${g.name || 'This student'} · ${t.title || 'this test'}`,
+                   'This will permanently remove all attempts and results for this test.',
+                   'The student may then start the test again from Attempt 1.' ],
+          warn: inprog ? 'This student has an unfinished attempt. It will also be removed and can no longer be resumed.' : '',
+          cancel: 'Cancel', confirm: 'Delete History'
+        });
+        if(!ok) return;
+        btn.disabled = true;
+        try{
+          const n = await adminDeleteTestHistory(t, g.studentId);
+          toast(`History deleted (${n.attempts} attempt${n.attempts===1?'':'s'}, ${n.results} result${n.results===1?'':'s'})`);
+          await load();
+        }catch(e){
+          console.error(e); toast('Could not delete history — check your connection or permissions.'); btn.disabled = false;
+        }
+      });
+      box.appendChild(card);
     });
-  });
+  }
+  load();
 }
 
 function drawManualBuilder(body){
