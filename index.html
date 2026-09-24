@@ -395,6 +395,7 @@ const COL = {
   liveClasses: 'liveClasses',
   tests: 'tests',
   testResults: 'testResults',
+  testAttempts: 'testAttempts', // Phase 1 test engine — one small doc per Live/Regular attempt
   notes: 'notes',
   payments: 'payments',
   upgradeRequests: 'upgradeRequests',
@@ -2197,11 +2198,527 @@ function openVideoPlayer(v){
   $('#closePlayer', overlay).addEventListener('click', ()=>{ clearInterval(timer); overlay.remove(); });
 }
 
+/* ================================================================
+   TEST ENGINE — Phase 1 (attempts · resume · history · Q-by-Q review)
+
+   How the pieces fit:
+   - tests/{id}            = the test DEFINITION (source of question content).
+                             Questions are read from `questions` when present,
+                             otherwise parsed out of the stored htmlContent
+                             (see getTestDef()) — so every existing manual
+                             test works without migration.
+   - testAttempts/{uid}_{testId}_{n} = one small doc per LIVE/REGULAR attempt
+                             (state + answers + score only, NO question text).
+                             Created once on Start, updated once on Submit.
+   - testResults/{attemptId} = compatibility summary row (same fields as
+                             before + attemptId/attemptNumber/etc.).
+   - Review = test definition + attempt.answers, combined in memory.
+   - PRACTICE never touches Firestore; history lives in localStorage.
+   - In-progress state (answers, seen, position) lives in localStorage
+     ('tms:attempt:<attemptId>'); the timer is derived from the attempt's
+     server startedAt, so refresh / reopen never resets it.
+   ================================================================ */
+const TEST_MAX_ATTEMPTS = 3;
+const TEST_ATTEMPT_LABELS = ['Main Attempt', 'Reattempt 1', 'Reattempt 2'];
+
+function tsToMs(ts){
+  if(ts == null) return null;
+  if(typeof ts === 'number') return ts;
+  if(ts.toMillis) return ts.toMillis();
+  if(ts.toDate) return ts.toDate().getTime();
+  return null;
+}
+function fmtDateTime(ms){
+  if(!ms) return '—';
+  return new Date(ms).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+function fmtMarks(x){ return String(Math.round((Number(x)||0)*100)/100); }
+function attemptLabel(n){ return TEST_ATTEMPT_LABELS[n-1] || ('Attempt '+n); }
+
+// LIVE / REGULAR / PRACTICE. Stored value 'selfpaced' is REGULAR.
+function testKind(t){
+  const ty = t && t.type;
+  if(ty === 'live') return 'live';
+  if(ty === 'selfpaced' || ty === 'regular') return 'regular';
+  return 'practice';
+}
+const TEST_KIND_META = {
+  live:     { icon:'🔴', label:'Live' },
+  regular:  { icon:'⏱', label:'Regular' },
+  practice: { icon:'📚', label:'Practice' }
+};
+
+function tmsErr(code, message, extra){ const e = new Error(message); e.tmsCode = code; e.extra = extra; return e; }
+
+/* -------- localStorage helpers (never throw) -------- */
+function tmsLsGet(k){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; }catch(e){ return null; } }
+function tmsLsSet(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } }
+function tmsLsDel(k){ try{ localStorage.removeItem(k); }catch(e){} }
+const tmsAttemptKey  = id => 'tms:attempt:' + id;
+const tmsPracticeKey = testId => 'tms:practice:' + CURRENT_USER.uid + ':' + testId;
+
+function tmsCleanAnswers(arr, n){
+  const out = new Array(n).fill(null);
+  if(Array.isArray(arr)) for(let i=0;i<n;i++){ const v = arr[i]; if(Number.isInteger(v) && v>=0 && v<=3) out[i] = v; }
+  return out;
+}
+function tmsCleanSeen(arr, n, answers){
+  const out = new Array(n).fill(false);
+  for(let i=0;i<n;i++) out[i] = !!(Array.isArray(arr) && arr[i]) || answers[i] != null;
+  return out;
+}
+
+/* -------- test definition (questions + scoring + timing) --------
+   Reads structured fields when they exist (questions, marksPerQuestion,
+   negativeMarksPerQuestion, totalMarks, durationMinutes, per-question
+   marks/negativeMarks). Falls back to what old manual tests carry:
+   the QUESTIONS/CORRECT_MARK/WRONG_MARK constants inside htmlContent and
+   the `duration` field. Tests whose HTML can't be parsed (pasted HTML)
+   come back with engine:false and keep the legacy one-shot player. */
+const _testDefCache = new Map();
+function getTestDef(t){
+  if(!t) return { engine:false };
+  const sig = (t.htmlContent ? t.htmlContent.length : 0) + ':' + (Array.isArray(t.questions) ? t.questions.length : 0) +
+              ':' + [t.marksPerQuestion, t.negativeMarksPerQuestion, t.totalMarks, t.durationMinutes, t.duration].join(',');
+  const hit = _testDefCache.get(t.id);
+  if(hit && hit.sig === sig) return hit.def;
+  const def = buildTestDef(t);
+  _testDefCache.set(t.id, { sig, def });
+  return def;
+}
+function buildTestDef(t){
+  let questions = null, parsedCorrect = null, parsedWrong = null;
+  if(Array.isArray(t.questions) && t.questions.length){
+    questions = t.questions;
+  } else if(typeof t.htmlContent === 'string'){
+    const m = t.htmlContent.match(/const QUESTIONS = (\[[\s\S]*?\]);\s*const CORRECT_MARK = (-?[\d.]+), WRONG_MARK = (-?[\d.]+);/);
+    if(m){
+      try{ questions = JSON.parse(m[1]); parsedCorrect = parseFloat(m[2]); parsedWrong = parseFloat(m[3]); }
+      catch(e){ questions = null; }
+    }
+  }
+  const valid = Array.isArray(questions) && questions.length > 0 && questions.every(q =>
+    q && typeof q === 'object' && Array.isArray(q.options) && Number.isInteger(q.correct) && q.correct >= 0 && q.correct <= 3);
+  if(!valid) return { engine:false };
+
+  const perCorrect = typeof t.marksPerQuestion === 'number' ? t.marksPerQuestion : (parsedCorrect != null ? parsedCorrect : 1);
+  let perWrong = 0;
+  if(typeof t.negativeMarksPerQuestion === 'number') perWrong = -Math.abs(t.negativeMarksPerQuestion);
+  else if(parsedWrong != null && typeof t.marksPerQuestion !== 'number') perWrong = parsedWrong;
+
+  const def = {
+    engine: true, questions, perCorrect, perWrong,
+    durationMin: typeof t.durationMinutes === 'number' ? t.durationMinutes : (parseInt(t.duration, 10) || 0),
+    layout: t.answerButtonLayout || 'grid2x2'
+  };
+  const sum = questions.reduce((s,q)=> s + (typeof q.marks === 'number' ? q.marks : perCorrect), 0);
+  def.fullMarks = typeof t.totalMarks === 'number' ? t.totalMarks : Math.round(sum*100)/100;
+  return def;
+}
+function playerMeta(t, def, durationMin){
+  return { title: t.title || 'Test', subject: t.subject || '', correctMark: def.perCorrect, wrongMark: def.perWrong,
+           duration: durationMin, answerButtonLayout: def.layout };
+}
+
+/* Score = marks for correct − deductions for wrong; unanswered = 0.
+   Full marks come from the definition and are never reduced by negatives. */
+function computeTestResult(def, answers){
+  let correct = 0, wrong = 0, skipped = 0, score = 0;
+  def.questions.forEach((q, i) => {
+    const a = answers[i];
+    if(a == null){ skipped++; return; }
+    if(a === q.correct){ correct++; score += (typeof q.marks === 'number' ? q.marks : def.perCorrect); }
+    else { wrong++; score += (typeof q.negativeMarks === 'number' ? -Math.abs(q.negativeMarks) : def.perWrong); }
+  });
+  return { score: Math.round(score*100)/100, total: def.fullMarks, correct, wrong, skipped, questionCount: def.questions.length };
+}
+
+/* Optional Live window (Phase 2 will add the admin fields liveStartAt /
+   liveEndAt on the test doc). Absent = no restriction, so existing Live
+   tests keep working. The same check is enforced server-side by
+   firestore.rules using request.time when an attempt is created. */
+function liveWindowState(t){
+  if(testKind(t) !== 'live') return { open:true, configured:false };
+  const s = tsToMs(t.liveStartAt), e = tsToMs(t.liveEndAt);
+  if(s == null && e == null) return { open:true, configured:false };
+  const now = Date.now();
+  if(s != null && now < s) return { open:false, configured:true, start:s, end:e, msg:'This live test opens on ' + fmtDateTime(s) + '.' };
+  if(e != null && now > e) return { open:false, configured:true, start:s, end:e, msg:'The start window for this live test closed on ' + fmtDateTime(e) + '.' };
+  return { open:true, configured:true, start:s, end:e };
+}
+
+/* -------- Firestore attempt access -------- */
+const attemptDocId = (uid, testId, n) => uid + '_' + testId + '_' + n;
+
+async function fetchMyAttempts(testId){
+  let q = db.collection(COL.testAttempts).where('studentId','==',CURRENT_USER.uid);
+  if(testId) q = q.where('testId','==',testId);
+  const snap = await q.get();
+  const out = [];
+  snap.forEach(d => out.push({ id:d.id, ...d.data() }));
+  out.sort((a,b)=> (a.attemptNumber||0) - (b.attemptNumber||0));
+  return out;
+}
+
+// Creates the ONE attempt doc for a new attempt. Firestore is authoritative:
+// existing attempts are re-read from the server first, and the doc id
+// (uid_testId_n) + rules make a duplicate or a 4th attempt impossible.
+async function createNewAttempt(t, def){
+  const uid = CURRENT_USER.uid;
+  const list = await fetchMyAttempts(t.id);
+  const inprog = list.find(a => a.status === 'in-progress');
+  if(inprog) throw tmsErr('in-progress', 'You already have an unfinished attempt for this test.', inprog);
+  if(list.length >= TEST_MAX_ATTEMPTS) throw tmsErr('limit', 'All ' + TEST_MAX_ATTEMPTS + ' attempts have been used.');
+  const lw = liveWindowState(t);
+  if(!lw.open) throw tmsErr('window', lw.msg);
+
+  const attemptNumber = list.length + 1;
+  const id = attemptDocId(uid, t.id, attemptNumber);
+  const ref = db.collection(COL.testAttempts).doc(id);
+  try{
+    await ref.set({
+      studentId: uid, testId: t.id, attemptNumber, status: 'in-progress',
+      startedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      questionCount: def.questions.length
+    });
+  }catch(e){
+    console.error('[test-engine] attempt create failed:', e);
+    // Most likely cause is a race (another tab/device just created it) — reconcile.
+    try{
+      const again = await fetchMyAttempts(t.id);
+      const ip = again.find(a => a.status === 'in-progress');
+      if(ip) throw tmsErr('in-progress', 'You already have an unfinished attempt for this test.', ip);
+    }catch(e2){ if(e2.tmsCode) throw e2; }
+    throw tmsErr('denied', 'Could not start this attempt. The test may not be open right now, or you may not have access to it.');
+  }
+  const snap = await ref.get();
+  const data = snap.data() || {};
+  const startedMs = tsToMs(data.startedAt) || Date.now();
+  return { attempt: { id, ...data, attemptNumber, status:'in-progress' }, startedMs, offset: startedMs - Date.now() };
+}
+
+// Completes the attempt exactly once (transaction re-checks status) and
+// writes the compatibility summary row testResults/{attemptId}.
+async function completeAttempt(t, def, attempt, answerDocs, result, kind){
+  const uid = CURRENT_USER.uid;
+  const aRef = db.collection(COL.testAttempts).doc(attempt.id);
+  const rRef = db.collection(COL.testResults).doc(attempt.id);
+  try{
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(aRef);
+      if(!snap.exists) throw tmsErr('missing', 'This attempt no longer exists.');
+      const d = snap.data();
+      if(d.studentId !== uid || d.testId !== t.id) throw tmsErr('mismatch', 'This attempt does not belong to you.');
+      if(d.status !== 'in-progress') throw tmsErr('already-completed', 'This attempt was already submitted.', d);
+      tx.update(aRef, {
+        status: 'completed',
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        answers: answerDocs,
+        score: result.score, correct: result.correct, wrong: result.wrong, skipped: result.skipped, total: result.total
+      });
+      tx.set(rRef, {
+        testId: t.id, testTitle: t.title || '', studentId: uid, studentName: (CURRENT_PROFILE && CURRENT_PROFILE.fullName) || '',
+        score: result.score, total: result.total, correct: result.correct, wrong: result.wrong, skipped: result.skipped,
+        questionCount: result.questionCount, attemptId: attempt.id, attemptNumber: attempt.attemptNumber, testType: kind,
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    });
+  }catch(e){
+    if(e && e.tmsCode === 'already-completed'){
+      return attemptToView({ id: attempt.id, ...e.extra }, def, {});
+    }
+    throw e;
+  }
+  return attemptToView({
+    id: attempt.id, attemptNumber: attempt.attemptNumber, answers: answerDocs, submittedAt: Date.now(),
+    score: result.score, total: result.total, correct: result.correct, wrong: result.wrong, skipped: result.skipped,
+    questionCount: result.questionCount
+  }, def, {});
+}
+
+/* -------- normalised "view" objects used by the review screen -------- */
+function attemptToView(a, def, extra){
+  extra = extra || {};
+  return {
+    kind: 'attempt', attemptNumber: a.attemptNumber || 0, label: attemptLabel(a.attemptNumber || 1),
+    submittedAtMs: tsToMs(a.submittedAt), score: a.score, total: a.total, correct: a.correct, wrong: a.wrong, skipped: a.skipped,
+    questionCount: a.questionCount || def.questions.length, answers: Array.isArray(a.answers) ? a.answers : [],
+    studentName: extra.studentName || ''
+  };
+}
+function practiceHistory(t){
+  const h = tmsLsGet(tmsPracticeKey(t.id));
+  return Array.isArray(h) ? h : [];
+}
+function practiceRecordToView(r, def){
+  return { kind:'practice', attemptNumber:0, label:'Practice', submittedAtMs:r.submittedAtMs, score:r.score, total:r.total,
+           correct:r.correct, wrong:r.wrong, skipped:r.skipped, questionCount:r.questionCount || def.questions.length,
+           answers: r.answers || [], studentName:'' };
+}
+
+/* -------- full-screen frame shared by the player and the review -------- */
+function openFullscreenFrame(title, subtitle){
+  const overlay = el(`
+    <div class="overlay open" style="align-items:stretch;justify-content:stretch">
+      <div style="background:#0d1117;width:100%;height:100%;display:flex;flex-direction:column;
+        padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)">
+        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
+          <button class="btn btn-ghost btn-sm" id="closeTest">${icon('close',15)}<span>Close</span></button>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title||'')}</div>
+            ${subtitle ? `<div style="font-size:10px;color:var(--text-dim)">${esc(subtitle)}</div>` : ''}
+          </div>
+        </div>
+        <iframe id="testIframe" style="width:100%;flex:1;border:none;background:#0d1117"></iframe>
+      </div>
+    </div>`);
+  document.body.appendChild(overlay);
+  return { overlay, frame: $('#testIframe', overlay), closeBtn: $('#closeTest', overlay) };
+}
+
+/* -------- review (student history, fresh result, admin) -------- */
+function openAttemptReview(t, def, view, opts){
+  opts = opts || {};
+  const sub = view.studentName ? ('Student: ' + view.studentName + ' · ' + view.label) : view.label;
+  const { overlay, frame, closeBtn } = openFullscreenFrame(t.title || 'Test', sub);
+  const boot = { mode:'review', review:view, durationMin:0, fullMarks:def.fullMarks, perCorrect:def.perCorrect, perWrong:def.perWrong };
+  frame.srcdoc = buildTestHTML(playerMeta(t, def, 0), def.questions, boot);
+  closeBtn.addEventListener('click', () => { overlay.remove(); if(opts.onExit) opts.onExit(); });
+}
+
+/* -------- the attempt player (Live / Regular / Practice) -------- */
+function launchTestPlayer(t, def, opts){
+  opts = opts || {};
+  const uid = CURRENT_USER.uid;
+  const kind = testKind(t);
+  const isPractice = kind === 'practice';
+  const n = def.questions.length;
+  const durationMin = isPractice ? 0 : def.durationMin;   // Practice is untimed (matches the builder's "Practice (no timer)")
+  let attempt = opts.attempt || null;   // existing in-progress attempt (resume) or the one created on Start
+  let rt = null;                        // { startedMs, offset } — timer basis for the active attempt
+  let finished = false, submitting = false, finishedView = null;
+
+  const number = attempt ? attempt.attemptNumber : (opts.attemptNumber || 1);
+  const boot = {
+    mode: isPractice ? 'practice' : 'attempt',
+    attemptNumber: isPractice ? 0 : number,
+    attemptLabel: isPractice ? 'Practice' : attemptLabel(number),
+    durationMin, fullMarks: def.fullMarks, perCorrect: def.perCorrect, perWrong: def.perWrong, resume: null
+  };
+  const deadlineFor = () => durationMin > 0 ? (rt.startedMs - rt.offset + durationMin*60000) : 0;
+
+  if(attempt){
+    const local = tmsLsGet(tmsAttemptKey(attempt.id));
+    const ok = !!(local && local.attemptId === attempt.id && local.studentId === uid && local.testId === t.id &&
+                  Array.isArray(local.answers) && local.answers.length === n);
+    const startedMs = tsToMs(attempt.startedAt) || (ok && local.startedAtMs) || Date.now();
+    rt = { startedMs, offset: (ok && typeof local.clockOffsetMs === 'number') ? local.clockOffsetMs : 0 };
+    const answers = tmsCleanAnswers(ok ? local.answers : null, n);
+    boot.resume = {
+      answers, seen: tmsCleanSeen(ok ? local.seen : null, n, answers),
+      cur: ok && Number.isInteger(local.cur) ? Math.min(Math.max(local.cur,0), n-1) : 0,
+      deadlineMs: deadlineFor(), restored: ok
+    };
+  }
+
+  const { overlay, frame, closeBtn } = openFullscreenFrame(t.title || 'Test', boot.attemptLabel);
+  frame.srcdoc = buildTestHTML(playerMeta(t, def, durationMin), def.questions, boot);
+  const post = m => { try{ frame.contentWindow.postMessage(Object.assign({ tms:1 }, m), '*'); }catch(e){} };
+
+  function saveLocal(m){
+    if(!attempt || finished) return;
+    const answers = tmsCleanAnswers(m.answers, n);
+    tmsLsSet(tmsAttemptKey(attempt.id), {
+      attemptId: attempt.id, studentId: uid, testId: t.id, attemptNumber: attempt.attemptNumber,
+      startedAtMs: rt.startedMs, clockOffsetMs: rt.offset,
+      cur: Number.isInteger(m.cur) ? m.cur : 0, answers, seen: tmsCleanSeen(m.seen, n, answers), savedAt: Date.now()
+    });
+  }
+
+  async function handleStart(){
+    if(isPractice || attempt) return;
+    try{
+      const res = await createNewAttempt(t, def);
+      attempt = res.attempt; rt = { startedMs: res.startedMs, offset: res.offset };
+      saveLocal({ cur:0, answers:new Array(n).fill(null), seen:[] });
+      post({ type:'started', deadlineMs: deadlineFor() });
+    }catch(err){
+      const msg = err.tmsCode === 'in-progress'
+        ? 'You already have an unfinished attempt for this test. Close this screen and tap RESUME ATTEMPT.'
+        : (err.tmsCode ? err.message : 'Could not start the test — check your connection and try again.');
+      post({ type:'startFailed', message: msg });
+    }
+  }
+
+  async function handleSubmit(m){
+    if(finished){ post({ type:'submitted', view: finishedView }); return; }
+    if(submitting) return;
+    submitting = true;
+    try{
+      const answers = tmsCleanAnswers(m.answers, n);
+      const seen = tmsCleanSeen(m.seen, n, answers);
+      const answerDocs = answers.map((a,i)=> ({ questionIndex:i, selectedAnswer:a, seen: !!seen[i] }));
+      const result = computeTestResult(def, answers);
+      let view;
+      if(isPractice){
+        const rec = { id:'p'+Date.now(), submittedAtMs:Date.now(), score:result.score, total:result.total, correct:result.correct,
+                      wrong:result.wrong, skipped:result.skipped, questionCount:n, answers:answerDocs };
+        const hist = practiceHistory(t); hist.unshift(rec);
+        tmsLsSet(tmsPracticeKey(t.id), hist.slice(0, 20));
+        view = practiceRecordToView(rec, def);
+      } else {
+        if(!attempt) throw tmsErr('missing', 'No active attempt to submit.');
+        view = await completeAttempt(t, def, attempt, answerDocs, result, kind);
+        tmsLsDel(tmsAttemptKey(attempt.id));
+      }
+      finished = true; finishedView = view;
+      post({ type:'submitted', view });
+    }catch(err){
+      console.error('[test-engine] submit failed:', err);
+      post({ type:'submitFailed', message: (err && err.tmsCode) ? err.message : 'Could not submit — check your connection and try again. Your answers are safe on this device.' });
+    }finally{
+      submitting = false;
+    }
+  }
+
+  function onMsg(e){
+    if(e.source !== frame.contentWindow) return;   // only our own player frame
+    const m = e.data;
+    if(!m || m.tms !== 1) return;
+    if(m.type === 'start') handleStart();
+    else if(m.type === 'state') saveLocal(m);
+    else if(m.type === 'submit') handleSubmit(m);
+  }
+  window.addEventListener('message', onMsg);
+
+  closeBtn.addEventListener('click', () => {
+    window.removeEventListener('message', onMsg);
+    overlay.remove();
+    if(attempt && !finished) toast('Attempt saved — resume it any time from the Tests tab on this device.');
+    if(opts.onExit) opts.onExit();
+  });
+}
+
+/* -------- per-test hub (attempts, history, start / resume / reattempt) -------- */
+function openTestHub(t, ctx){
+  const def = getTestDef(t);
+  const kind = testKind(t);
+  const isPractice = kind === 'practice';
+  const km = TEST_KIND_META[kind];
+  const overlay = el(`<div class="overlay open"><div class="sheet">
+    <div class="sheet-handle"></div><button class="sheet-close" id="hubClose" aria-label="Close">${icon('close')}</button><div style="clear:both"></div>
+    <div id="hubBody"><div class="spinner"></div></div>
+  </div></div>`);
+  document.body.appendChild(overlay);
+  const body = $('#hubBody', overlay);
+  $('#hubClose', overlay).addEventListener('click', () => overlay.remove());
+
+  function histRow(o){
+    return `<div style="padding:9px 0;border-bottom:1px solid var(--border-soft)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="min-width:0"><div style="font-size:13px;font-weight:700">${esc(o.label)}</div>
+        <div style="font-size:11px;color:var(--text-dim)">${esc(fmtDateTime(o.ms))}</div></div>
+        <div style="font-size:14px;font-weight:700">${esc(fmtMarks(o.score))}/${esc(fmtMarks(o.total))}</div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:8px">
+        <div style="font-size:11px;color:var(--text-muted)">✓ ${o.correct} correct · ✗ ${o.wrong} wrong · — ${o.skipped} unanswered</div>
+        ${o.rv ? `<button class="btn-sm btn-ghost" data-rv="${esc(o.rv)}">Review</button>` : ''}
+      </div></div>`;
+  }
+
+  function paint(list){
+    const dur = (!isPractice && def.durationMin) ? (' · ' + def.durationMin + ' min') : '';
+    const lw = liveWindowState(t);
+    let html = `<div class="card">
+      <div style="font-size:16px;font-weight:700">${esc(t.title || 'Untitled test')}</div>
+      <div class="item-meta">${esc(t.subject || '')}${t.subject ? ' · ' : ''}${def.questions.length} Qs${dur} · Full marks ${esc(fmtMarks(def.fullMarks))}</div>
+      <div class="item-badges" style="margin-top:6px"><span class="badge badge-accent">${km.icon} ${km.label}</span></div>
+      ${(lw.configured && kind === 'live') ? `<div class="hint" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Start window: ${esc(fmtDateTime(lw.start))}${lw.end ? ' → ' + esc(fmtDateTime(lw.end)) : ''}</div>` : ''}
+    </div>`;
+
+    if(isPractice){
+      const hist = practiceHistory(t);
+      html += `<div class="card-title" style="margin:12px 0 4px">Practice history (this device only)</div>`;
+      html += hist.length
+        ? hist.map(r => histRow({ label:'Practice', ms:r.submittedAtMs, score:r.score, total:r.total, correct:r.correct, wrong:r.wrong, skipped:r.skipped, rv:r.id })).join('')
+        : `<div class="empty-state" style="padding:14px 0">No practice attempts yet.</div>`;
+      html += `<button class="btn btn-primary" id="hubStart" style="margin-top:14px">Start Practice</button>
+               <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">Unlimited attempts. Practice results stay in this browser only and are not shared with your teacher.</div>`;
+    } else {
+      const done = list.filter(a => a.status === 'completed');
+      const inprog = list.find(a => a.status === 'in-progress');
+      const legacy = ctx.legacy(t.id);
+      html += `<div class="card-title" style="margin:12px 0 4px">Attempts: ${list.length}/${TEST_MAX_ATTEMPTS}</div>`;
+      if(inprog){
+        html += `<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
+          <div style="font-weight:700;font-size:14px;color:var(--warning)">You have an unfinished attempt. Resume?</div>
+          <div style="font-size:12px;color:var(--text-muted);margin:4px 0 10px;line-height:1.5">${esc(attemptLabel(inprog.attemptNumber))} (attempt ${inprog.attemptNumber}) is still in progress. Resuming does not use another attempt.</div>
+          <button class="btn btn-primary" id="hubResume">RESUME ATTEMPT</button></div>`;
+      }
+      html += done.length
+        ? done.slice().reverse().map(a => histRow({ label:attemptLabel(a.attemptNumber), ms:tsToMs(a.submittedAt), score:a.score, total:a.total, correct:a.correct, wrong:a.wrong, skipped:a.skipped, rv:a.id })).join('')
+        : (inprog ? '' : `<div class="empty-state" style="padding:14px 0">You haven\u2019t attempted this test yet.</div>`);
+      if(legacy.length){
+        html += `<div class="card-title" style="margin:14px 0 4px;font-size:12px">Earlier results (before attempt history)</div>`;
+        html += legacy.map(r => histRow({ label:'Earlier result', ms:tsToMs(r.submittedAt), score:r.score, total:r.total, correct:'–', wrong:'–', skipped:'–', rv:'' })).join('');
+      }
+      if(!inprog){
+        if(list.length >= TEST_MAX_ATTEMPTS){
+          html += `<div style="font-size:12px;color:var(--text-muted);margin-top:14px">All ${TEST_MAX_ATTEMPTS} attempts used. Your results and reviews stay available here.</div>`;
+        } else if(!lw.open){
+          html += `<div class="auth-error" style="margin-top:14px;display:block">${esc(lw.msg)}</div>`;
+        } else {
+          html += `<button class="btn btn-primary" id="hubStart" style="margin-top:14px">${list.length === 0 ? 'Start Test' : 'Reattempt'}</button>
+                   <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">${TEST_MAX_ATTEMPTS} attempts in total. If you leave a started attempt, you can resume it on this device.</div>`;
+        }
+      }
+    }
+    body.innerHTML = html;
+
+    const startBtn = $('#hubStart', body);
+    if(startBtn) startBtn.addEventListener('click', () => {
+      launchTestPlayer(t, def, { attemptNumber: isPractice ? 0 : list.length + 1, onExit: refresh });
+    });
+    const resumeBtn = $('#hubResume', body);
+    if(resumeBtn) resumeBtn.addEventListener('click', () => {
+      const ip = list.find(a => a.status === 'in-progress');
+      launchTestPlayer(t, def, { attempt: ip, onExit: refresh });
+    });
+    $all('[data-rv]', body).forEach(b => b.addEventListener('click', () => {
+      const id = b.dataset.rv;
+      if(isPractice){
+        const r = practiceHistory(t).find(x => x.id === id);
+        if(r) openAttemptReview(t, def, practiceRecordToView(r, def));
+      } else {
+        const a = list.find(x => x.id === id);
+        if(a) openAttemptReview(t, def, attemptToView(a, def, { studentName: (CURRENT_PROFILE && CURRENT_PROFILE.fullName) || '' }));
+      }
+    }));
+  }
+
+  async function refresh(){
+    if(isPractice){ paint([]); return; }
+    try{
+      const list = await fetchMyAttempts(t.id);      // fresh from the server — Firestore is authoritative
+      ctx.setAttempts(t.id, list);
+      paint(list);
+    }catch(e){
+      console.error('[test-engine] hub load failed:', e);
+      body.innerHTML = `<div class="empty-state">Could not load your attempts — check your connection.</div><button class="btn btn-ghost" id="hubRetry" style="margin-top:10px">Retry</button>`;
+      $('#hubRetry', body).addEventListener('click', refresh);
+    }
+  }
+  refresh();
+}
+
+/* ================================================================
+   STUDENT — Tests tab
+   ================================================================ */
 function renderTestsTab(container){
   const filterRow = el(`<div class="tab-filter">
     <button data-f="all">All</button>
     <button data-f="live">🔴 Live</button>
-    <button data-f="selfpaced">⏱ Self-paced</button>
+    <button data-f="regular">⏱ Regular</button>
     <button data-f="practice">📚 Practice</button>
   </div>`);
   container.appendChild(filterRow);
@@ -2218,13 +2735,31 @@ function renderTestsTab(container){
   });
 
   let allTests = [];
-  let myResults = {};
+  let attemptsByTest = {};   // testId -> [attempt docs] (Live/Regular)
+  let legacyByTest = {};     // testId -> [testResults rows from before attempt tracking]
 
-  db.collection(COL.testResults).where('studentId','==',CURRENT_USER.uid).get().then(snap=>{
-    myResults = {};
-    snap.forEach(d=>{ const r=d.data(); myResults[r.testId] = r; });
+  const ctx = {
+    attempts: id => attemptsByTest[id] || [],
+    legacy:   id => legacyByTest[id] || [],
+    // called by the hub after it re-reads a test's attempts from the server; repaints the card badges
+    setAttempts: (id, list) => { attemptsByTest[id] = list; applyFilter(); }
+  };
+
+  async function loadHistory(){
+    try{
+      const uid = CURRENT_USER.uid;
+      const [aSnap, rSnap] = await Promise.all([
+        db.collection(COL.testAttempts).where('studentId','==',uid).get(),
+        db.collection(COL.testResults).where('studentId','==',uid).get()
+      ]);
+      attemptsByTest = {}; legacyByTest = {};
+      aSnap.forEach(d => { const a = { id:d.id, ...d.data() }; (attemptsByTest[a.testId] = attemptsByTest[a.testId] || []).push(a); });
+      Object.keys(attemptsByTest).forEach(k => attemptsByTest[k].sort((a,b)=> (a.attemptNumber||0)-(b.attemptNumber||0)));
+      rSnap.forEach(d => { const r = d.data(); if(r.attemptId) return; (legacyByTest[r.testId] = legacyByTest[r.testId] || []).push(r); });
+    }catch(e){ console.error('[test-engine] history load failed:', e); }
     applyFilter();
-  }).catch(()=>{});
+  }
+  loadHistory();
 
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
@@ -2236,70 +2771,62 @@ function renderTestsTab(container){
   });
 
   function applyFilter(){
-    const filtered = currentFilter==='all' ? allTests : allTests.filter(t=>t.type===currentFilter);
-    renderTestList(listBox, filtered, myResults);
+    const filtered = currentFilter==='all' ? allTests : allTests.filter(t=>testKind(t)===currentFilter);
+    renderTestList(listBox, filtered, ctx);
   }
 }
 
-function renderTestList(box, tests, myResults){
+function renderTestList(box, tests, ctx){
   box.innerHTML='';
   if(!tests.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📝</div>No tests here yet.</div>`)); return; }
   tests.forEach(t=>{
-    const r = myResults[t.id];
-    const typeIcon = t.type==='live' ? '🔴' : t.type==='selfpaced' ? '⏱' : '📚';
+    const kind = testKind(t), km = TEST_KIND_META[kind];
+    const def = getTestDef(t);
+    let badges = `<span class="badge badge-accent">${km.icon} ${km.label}</span>`;
+    if(def.engine && kind !== 'practice'){
+      const list = ctx.attempts(t.id);
+      const done = list.filter(a => a.status === 'completed');
+      const last = done[done.length-1];
+      badges += `<span class="badge badge-muted">Attempts ${list.length}/${TEST_MAX_ATTEMPTS}</span>`;
+      if(list.some(a => a.status === 'in-progress')) badges += `<span class="badge badge-paid">Unfinished</span>`;
+      if(last) badges += `<span class="badge badge-muted">${esc(fmtMarks(last.score))}/${esc(fmtMarks(last.total))}</span>`;
+    } else if(!def.engine){
+      const lg = ctx.legacy(t.id); const r = lg[lg.length-1];
+      if(r) badges += `<span class="badge badge-muted">${esc(r.score)}/${esc(r.total)}</span>`;
+    }
     const card = el(`
       <div class="item-card">
         <div class="item-top">
-          <div class="item-icon">${typeIcon}</div>
+          <div class="item-icon">${km.icon}</div>
           <div class="item-info">
             <div class="item-title">${esc(t.title||'Untitled test')}</div>
             <div class="item-meta">${esc(t.subject||'')}${t.duration?(' · '+t.duration+' min'):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
-            <div class="item-badges">
-              <span class="badge badge-accent">${typeIcon} ${t.type==='live'?'Live':t.type==='selfpaced'?'Self-paced':'Practice'}</span>
-              ${r?`<span class="badge badge-muted">${r.score}/${r.total}</span>`:''}
-            </div>
+            <div class="item-badges">${badges}</div>
           </div>
         </div>
       </div>`);
-    card.addEventListener('click', ()=> openTestPlayer(t));
+    card.addEventListener('click', ()=> def.engine ? openTestHub(t, ctx) : openLegacyTestPlayer(t));
     box.appendChild(card);
   });
 }
 
-function openTestPlayer(t){
-  // Full-window test experience: this deliberately does NOT reuse the
-  // small bottom-sheet ".sheet" component (max-height:92vh, iframe
-  // capped at a fraction of that) that every other modal in this app
-  // uses. A test needs the entire viewport, so this builds its own
-  // fixed, edge-to-edge container on top of the shared ".overlay"
-  // backdrop instead, with safe-area padding for notches/home
-  // indicators, and lets the iframe fill 100% of it.
-  const overlay = el(`
-    <div class="overlay open" style="align-items:stretch;justify-content:stretch">
-      <div style="background:#0d1117;width:100%;height:100%;display:flex;flex-direction:column;
-        padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)">
-        <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-soft);flex-shrink:0">
-          <button class="btn btn-ghost btn-sm" id="closeTest">${icon('close',15)}<span>Close</span></button>
-          <div style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title||'')}</div>
-        </div>
-        <iframe id="testIframe" style="width:100%;flex:1;border:none;background:#0d1117"></iframe>
-      </div>
-    </div>`);
-  document.body.appendChild(overlay);
-  const frame = $('#testIframe', overlay);
+/* Legacy path — only for tests whose HTML has no readable question data
+   (pasted HTML). Same one-shot behaviour as before, except Practice no
+   longer writes to Firestore and only messages from this frame count. */
+function openLegacyTestPlayer(t){
+  const { overlay, frame, closeBtn } = openFullscreenFrame(t.title || '', '');
   frame.srcdoc = t.htmlContent || '<p style="font-family:sans-serif;padding:20px;color:#888">No content in this test yet.</p>';
-
   function onMsg(e){
+    if(e.source !== frame.contentWindow) return;
     if(e.data && e.data.type === 'submit_test'){
-      saveTestResult(t, e.data.score, e.data.total);
+      if(testKind(t) !== 'practice' && Number.isFinite(Number(e.data.score)) && Number.isFinite(Number(e.data.total))){
+        saveTestResult(t, Number(e.data.score), Number(e.data.total));
+      }
       window.removeEventListener('message', onMsg);
     }
   }
   window.addEventListener('message', onMsg);
-  $('#closeTest', overlay).addEventListener('click', ()=>{
-    window.removeEventListener('message', onMsg);
-    overlay.remove();
-  });
+  closeBtn.addEventListener('click', ()=>{ window.removeEventListener('message', onMsg); overlay.remove(); });
 }
 
 async function saveTestResult(t, score, total){
@@ -2579,41 +3106,53 @@ function renderProfileTab(container){
   container.appendChild(logoutBtn);
 }
 
-function buildTestHTML(meta, questions){
-  // Defends against a script-closing tag anywhere in admin-entered
-  // text/JSON prematurely closing the <script> tag when the browser's
-  // HTML parser scans this generated page — same escaping trick this
-  // project already uses for the outer template's own closing tags.
-  const jsSafe = v => JSON.stringify(v).replace(/<\/script/gi, '<\\/script');
-  const qData = jsSafe(questions);
-  const correctMark = meta.correctMark ?? 4;
-  const wrongMark = meta.wrongMark ?? -1;
-  const durationSec = (meta.duration||0) * 60;
-  const layout = meta.answerButtonLayout || 'grid2x2';
-  const layoutClass = layout==='horizontal' ? 'layout-h' : layout==='vertical' ? 'layout-v' : 'layout-grid';
-  return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<script>window.MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']]}};<\/script>
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" defer><\/script>
-<style>
+/* ================================================================
+   TEST PLAYER PAGE (runs inside the sandbox-less iframe)
+
+   buildTestHTML() is used in two ways:
+   1) At publish time by the Manual Builder (no `boot`) — the stored
+      htmlContent keeps the QUESTIONS / CORRECT_MARK / WRONG_MARK lines
+      that getTestDef() reads back.
+   2) At runtime by the test engine, ALWAYS regenerated from the parsed
+      questions with a `boot` object (mode attempt | practice | review).
+      This is why tests published before Phase 1 get the new player,
+      resume and review without any migration.
+
+   The player script is a real function (tmsPlayerMain) serialised with
+   .toString(), so it is ordinary, lintable code instead of a giant string.
+   The iframe never touches Firestore: it talks to the app via postMessage
+   ({tms:1, type:'start'|'state'|'submit'} out, 'started'|'startFailed'|
+   'submitted'|'submitFailed' in).
+   ================================================================ */
+const TMS_PLAYER_CSS = `
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{overflow-x:hidden}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;font-size:14px}
-#introScreen,#testScreen,#resultScreen{padding:12px}
+#introScreen,#testScreen,#reviewScreen{padding:12px}
 .intro{display:flex;flex-direction:column;justify-content:center;min-height:100vh;text-align:center}
 .intro h1{font-size:20px;margin-bottom:6px}
+.attempt-tag{display:inline-block;align-self:center;font-size:11px;font-weight:700;color:#a89ae0;background:rgba(127,119,221,.15);border-radius:20px;padding:3px 10px;margin-bottom:8px}
 .meta-line{font-size:13px;color:#8b949e;margin-bottom:18px}
-.instr{text-align:left;background:#161b22;border-radius:10px;padding:14px 16px;margin:0 auto 22px;max-width:420px;font-size:13px;line-height:1.9;color:#c9d1d9}
+.instr{text-align:left;background:#161b22;border-radius:10px;padding:14px 16px;margin:0 auto 18px;max-width:420px;font-size:13px;line-height:1.8;color:#c9d1d9}
 .startBtn{padding:14px 28px;background:#7f77dd;color:#fff;border:none;border-radius:10px;font-weight:700;font-size:15px;cursor:pointer;align-self:center}
-.header{background:#161b22;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;gap:10px}
+.startBtn:disabled{opacity:.6;cursor:default}
+.start-err{color:#f87171;font-size:12px;max-width:420px;margin:12px auto 0;line-height:1.5}
+.header{background:#161b22;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;gap:10px;z-index:5}
 .title{font-weight:700;font-size:14px}
 .progress-bar{height:4px;background:#21262d;border-radius:2px;overflow:hidden;margin-top:6px;width:100%}
 .progress-fill{height:100%;background:#7f77dd;transition:width .2s}
 .timer{color:#ef4444;font-weight:700;font-family:monospace;font-size:16px;flex-shrink:0}
 .palette{display:flex;flex-wrap:wrap;gap:5px;padding:10px 12px;background:#161b22;border-radius:10px;margin-bottom:10px}
-.pb{width:28px;height:28px;border-radius:6px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#1c2333;color:#8b949e}
+.pb{width:28px;height:28px;border-radius:6px;border:1.5px solid transparent;font-size:11px;font-weight:700;cursor:pointer;background:#1c2333;color:#8b949e}
 .pb.done{background:rgba(34,197,94,.3);color:#4ade80}
-.pb.cur{background:#7f77dd;color:#fff}
+.pb.na{background:rgba(239,68,68,.18);color:#f87171;border-color:rgba(239,68,68,.55)}
+.pb.cur{background:#7f77dd;color:#fff;border-color:#7f77dd}
+.pb.rc{background:rgba(34,197,94,.3);color:#4ade80}
+.pb.rw{background:#ef4444;color:#fff}
+.pb.ru{background:rgba(239,68,68,.12);color:#f87171;border-color:#ef4444}
+.pb.rn{background:#1c2333;color:#8b949e}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:#8b949e;margin:0 0 10px;padding:0 4px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1.5px solid transparent}
 .q-card{background:#161b22;border-radius:10px;padding:14px;margin-bottom:10px}
 .q-num{font-size:11px;color:#8b949e;margin-bottom:6px}
 .q-text{font-size:14px;margin-bottom:10px;line-height:1.6}
@@ -2621,7 +3160,6 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 .q-image{margin:10px 0}
 .q-image img{max-width:100%;border-radius:8px;display:block}
 .q-image .imgerr{font-size:12px;color:#ef4444;padding:10px;background:#1c1116;border-radius:8px}
-.q-link{display:inline-block;font-size:12px;color:#7f77dd;margin-bottom:10px;text-decoration:none}
 .opts{margin-top:4px}
 .opts.layout-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .opts.layout-h{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
@@ -2631,42 +3169,59 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 .opt.noTextOpt{justify-content:center}
 .key{width:20px;height:20px;border-radius:50%;background:#0d1117;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0}
 .opt.noTextOpt .key{width:32px;height:32px;font-size:14px}
+.clear-hint{font-size:11px;color:#6b7280;margin-top:8px}
 .navrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
 .nb{padding:10px;border-radius:8px;border:none;font-weight:700;font-size:13px;cursor:pointer;background:#1c2333;color:#e6edf3}
 .nb:disabled{opacity:.4;cursor:default}
 .nb.submitStyle{background:#ef4444;color:#fff}
-.result{background:#161b22;border-radius:10px;padding:16px;text-align:center}
-.score{font-size:32px;font-weight:700;color:#7f77dd;margin:8px 0}
-.sol{background:#161b22;border-radius:10px;padding:12px;margin-top:10px}
+.result{background:#161b22;border-radius:10px;padding:16px;text-align:center;margin-bottom:10px}
+.rmeta{font-size:12px;color:#8b949e;margin-top:3px}
+.score{font-size:34px;font-weight:700;color:#7f77dd;margin:8px 0 2px}
+.chips{display:flex;justify-content:center;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
+.c-ok{background:rgba(34,197,94,.2);color:#4ade80}
+.c-no{background:rgba(239,68,68,.22);color:#f87171}
+.c-un{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.45)}
+.banner{background:#1f1a0d;border:1px solid #6b5a1a;color:#fbbf24;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.5;margin-bottom:10px}
+.sol{background:#161b22;border-radius:10px;padding:12px;margin-top:10px;scroll-margin-top:8px}
 .sol.correct{border-left:3px solid #22c55e}
 .sol.wrong{border-left:3px solid #ef4444}
-.sol.skip{border-left:3px solid #6b7280}
+.sol.unans{border-left:3px solid #ef4444;background:#1a1416}
+.sol.notseen{border-left:3px solid #6b7280}
+.st{font-size:12px;font-weight:700;margin:6px 0}
+.st.correct{color:#4ade80}.st.wrong,.st.unans{color:#f87171}.st.notseen{color:#8b949e}
+.ropt{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid #30363d;border-radius:8px;margin-top:6px}
+.ropt.correct{border-color:#22c55e;background:rgba(34,197,94,.12)}
+.ropt.wrongpick{border-color:#ef4444;background:rgba(239,68,68,.12)}
+.ropt .otext{flex:1;min-width:0;line-height:1.5}
+.tag{margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.tag.ok{background:rgba(34,197,94,.25);color:#4ade80}
+.tag.no{background:rgba(239,68,68,.25);color:#f87171}
 .rq-image img{max-width:100%;border-radius:8px;margin:6px 0}
-.explain-box{margin-top:8px;padding-top:8px;border-top:1px dashed #30363d;font-size:12px;color:#8b949e}
+.explain-box{margin-top:10px;padding-top:8px;border-top:1px dashed #30363d;font-size:12px;color:#a0aab6;line-height:1.6}
+.explain-box b{display:block;font-size:11px;color:#8b949e;margin-bottom:3px}
 .explain-box img{max-width:100%;border-radius:6px;margin:6px 0}
 .explain-link{color:#7f77dd;font-size:12px;display:inline-block;margin-top:4px}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
 .modal-bg.open{display:flex}
 .modal-card{background:#161b22;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center}
 .modal-card p{font-size:13px;color:#c9d1d9;line-height:1.6;margin-bottom:16px}
 .modal-actions{display:flex;gap:8px}
 .modal-actions button{flex:1;padding:10px;border-radius:8px;border:none;font-weight:700;font-size:13px;cursor:pointer}
+.modal-actions button:disabled{opacity:.5}
 .mCancel{background:#21262d;color:#e6edf3}
 .mSubmit{background:#ef4444;color:#fff}
-</style></head>
-<body oncontextmenu="return false">
+.flash{position:fixed;left:12px;right:12px;bottom:14px;background:#21262d;color:#e6edf3;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.5;z-index:60;box-shadow:0 4px 18px rgba(0,0,0,.5)}
+`;
 
+const TMS_PLAYER_BODY = `
 <div id="introScreen" class="intro">
   <h1 id="introTitle"></h1>
+  <div class="attempt-tag" id="introLabel" style="display:none"></div>
   <div class="meta-line" id="introMeta"></div>
-  <div class="instr">
-    • Read each question carefully.<br>
-    • Select one answer: A, B, C or D.<br>
-    • You may change your answer before submission.<br>
-    • Unanswered questions will be counted as skipped.<br>
-    • Submit only when you are ready.
-  </div>
+  <div class="instr" id="introInstr"></div>
   <button class="startBtn" id="startBtn">Start Test</button>
+  <div class="start-err" id="startErr"></div>
 </div>
 
 <div id="testScreen" style="display:none">
@@ -2679,11 +3234,12 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
     <div class="timer" id="tm">--:--</div>
   </div>
   <div class="palette" id="palette"></div>
+  <div class="legend"><span><i style="background:rgba(34,197,94,.3)"></i>Answered</span><span><i style="background:rgba(239,68,68,.18);border-color:rgba(239,68,68,.55)"></i>Seen, not answered</span><span><i style="background:#1c2333"></i>Not seen</span></div>
   <div id="quizArea"></div>
   <div class="navrow"><button class="nb" id="prevB">← Prev</button><button class="nb" id="nextB">Next →</button></div>
 </div>
 
-<div id="resultScreen" style="display:none"></div>
+<div id="reviewScreen" style="display:none"></div>
 
 <div class="modal-bg" id="confirmModal">
   <div class="modal-card">
@@ -2692,6 +3248,318 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
   </div>
 </div>
 
+<div class="modal-bg" id="busyModal">
+  <div class="modal-card">
+    <p id="busyText"></p>
+    <div class="modal-actions" id="busyActions" style="display:none"></div>
+  </div>
+</div>
+`;
+
+// Runs INSIDE the iframe. Reads the globals QUESTIONS, BOOT, TITLE, SUBJECT,
+// LAYOUT_CLASS declared by the preceding <script>. Never called in the app itself.
+function tmsPlayerMain(){
+  var KEYS = ['A','B','C','D'];
+  var N = QUESTIONS.length;
+  var mode = BOOT.mode || 'practice';
+  var cur = 0, answers = [], seen = [];
+  for(var z=0; z<N; z++){ answers.push(null); seen.push(false); }
+  var started = false, submitting = false, done = false, lastAuto = false, deadline = 0, timerHandle = null;
+
+  function $(id){ return document.getElementById(id); }
+  function h(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function num(x){ return String(Math.round((Number(x)||0)*100)/100); }
+  function post(m){ m.tms = 1; try{ window.parent.postMessage(m, '*'); }catch(e){} }
+  function typeset(node){ try{ if(window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([node]); }catch(e){} }
+  function flash(msg){
+    var d = document.createElement('div'); d.className = 'flash'; d.textContent = msg;
+    document.body.appendChild(d); setTimeout(function(){ if(d.parentNode) d.parentNode.removeChild(d); }, 4500);
+  }
+  function fmtDate(ms){
+    if(!ms) return '';
+    try{ return new Date(ms).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return ''; }
+  }
+
+  // Broken images: hide + show the inline error text (no inline handlers needed)
+  document.addEventListener('error', function(e){
+    var t = e.target;
+    if(t && t.tagName === 'IMG'){
+      t.style.display = 'none';
+      var n = t.nextElementSibling;
+      if(n && n.className === 'imgerr') n.style.display = 'block';
+    }
+  }, true);
+
+  /* ---------------- intro ---------------- */
+  function renderIntro(){
+    $('introTitle').textContent = TITLE;
+    $('hdrTitle').textContent = TITLE;
+    if(BOOT.attemptLabel){ $('introLabel').textContent = BOOT.attemptLabel; $('introLabel').style.display = 'inline-block'; }
+    var bits = [];
+    if(SUBJECT) bits.push(SUBJECT);
+    bits.push(N + (N===1 ? ' question' : ' questions'));
+    bits.push(BOOT.durationMin > 0 ? (BOOT.durationMin + ' min') : 'No time limit');
+    if(BOOT.fullMarks) bits.push('Full marks ' + num(BOOT.fullMarks));
+    $('introMeta').textContent = bits.join(' · ');
+    var l = [];
+    l.push('• Read each question carefully.');
+    l.push('• Select one answer: A, B, C or D. Tap the selected answer again to clear it.');
+    l.push('• You may change your answers before submitting.');
+    var marks = '• Correct answer: +' + num(BOOT.perCorrect) + ' marks.';
+    if(BOOT.perWrong < 0) marks += ' Wrong answer: \u2212' + num(Math.abs(BOOT.perWrong)) + '.';
+    marks += ' Unanswered: 0.';
+    l.push(marks);
+    if(BOOT.durationMin > 0) l.push('• The timer keeps running even if you refresh or leave.');
+    if(mode === 'attempt') l.push('• If you leave before submitting, you can resume this attempt on this device.');
+    if(mode === 'practice') l.push('• Practice: results stay on this device only.');
+    $('introInstr').innerHTML = l.join('<br>');
+  }
+
+  /* ---------------- test ---------------- */
+  function saveState(){
+    if(mode === 'attempt') post({ type:'state', cur:cur, answers:answers, seen:seen });
+  }
+  function renderQ(){
+    var q = QUESTIONS[cur];
+    seen[cur] = true;
+    var parts = '<div class="q-card"><div class="q-num">Question '+(cur+1)+' of '+N+'</div>';
+    if(q.text) parts += '<div class="q-text">'+q.text+'</div>';
+    if(q.imageUrl) parts += '<div class="q-image"><img src="'+h(q.imageUrl)+'" alt=""><div class="imgerr" style="display:none">Image failed to load</div></div>';
+    var hasOptText = (q.options||[]).some(function(o){ return o && String(o).trim(); });
+    parts += '<div class="opts '+LAYOUT_CLASS+'">';
+    for(var i=0;i<4;i++){
+      var optText = (q.options && q.options[i]) ? q.options[i] : '';
+      var cls = 'opt'+(answers[cur]===i?' sel':'')+(!hasOptText?' noTextOpt':'');
+      parts += '<div class="'+cls+'" data-i="'+i+'"><div class="key">'+KEYS[i]+'</div>'+(optText?'<div>'+optText+'</div>':'')+'</div>';
+    }
+    parts += '</div><div class="clear-hint">Tap the selected answer again to clear it.</div></div>';
+    $('quizArea').innerHTML = parts;
+    typeset($('quizArea'));
+    renderPalette(); updateHeader(); updateNav();
+    saveState();
+  }
+  function selectOpt(i){
+    if(submitting || done) return;
+    answers[cur] = (answers[cur] === i) ? null : i;   // tapping the selected option again clears it
+    renderQ();
+  }
+  function renderPalette(){
+    var out = '';
+    for(var i=0;i<N;i++){
+      var c = i===cur ? 'cur' : (answers[i]!=null ? 'done' : (seen[i] ? 'na' : ''));
+      out += '<button class="pb '+c+'" data-i="'+i+'">'+(i+1)+'</button>';
+    }
+    $('palette').innerHTML = out;
+  }
+  function jump(i){ if(submitting||done) return; cur = i; renderQ(); }
+  function updateHeader(){
+    $('hdrProgress').textContent = 'Question '+(cur+1)+' of '+N;
+    $('progFill').style.width = Math.round(((cur+1)/N)*100)+'%';
+  }
+  function updateNav(){
+    $('prevB').disabled = (cur===0);
+    var nb = $('nextB');
+    if(cur === N-1){ nb.textContent = 'Submit Test'; nb.classList.add('submitStyle'); }
+    else { nb.textContent = 'Next \u2192'; nb.classList.remove('submitStyle'); }
+  }
+
+  /* ---------------- timer (derived from a fixed deadline, never a counter) ---------------- */
+  function tick(){
+    if(done) return;
+    var rem = Math.max(0, Math.ceil((deadline - Date.now())/1000));
+    var hh = Math.floor(rem/3600), mm = Math.floor((rem%3600)/60), ss = rem%60;
+    var txt = (hh>0 ? hh+':' : '') + (hh>0 ? String(mm).padStart(2,'0') : String(mm).padStart(2,'0')) + ':' + String(ss).padStart(2,'0');
+    var t = $('tm'); if(t) t.textContent = txt;
+    if(rem <= 0){
+      if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
+      $('confirmModal').classList.remove('open');
+      doSubmit(true);
+    }
+  }
+  function startTicker(){
+    if(!(deadline > 0)){ $('tm').textContent = 'No limit'; return; }
+    if(timerHandle) clearInterval(timerHandle);
+    timerHandle = setInterval(tick, 1000);
+    tick();
+  }
+
+  function begin(o){
+    if(started) return;
+    started = true; o = o || {};
+    if(o.answers){
+      for(var i=0;i<N;i++){ answers[i] = (o.answers[i]==null ? null : o.answers[i]); seen[i] = !!(o.seen && o.seen[i]) || answers[i]!=null; }
+      cur = Math.min(Math.max(o.cur||0,0), N-1);
+    }
+    deadline = o.deadlineMs || 0;
+    $('introScreen').style.display = 'none';
+    $('testScreen').style.display = 'block';
+    renderQ();
+    startTicker();
+  }
+
+  /* ---------------- submit ---------------- */
+  function openConfirm(){
+    if(submitting || done) return;
+    var answered = 0; for(var i=0;i<N;i++) if(answers[i]!=null) answered++;
+    var un = N - answered;
+    var msg = un > 0
+      ? 'You have answered '+answered+'/'+N+' questions. '+un+' question'+(un===1?' is':'s are')+' unanswered. Submit anyway?'
+      : 'You have answered all '+N+' questions. Submit your test?';
+    $('confirmText').textContent = msg;
+    $('confirmModal').classList.add('open');
+  }
+  function showBusy(msg, actions){
+    $('busyText').textContent = msg;
+    var a = $('busyActions');
+    if(actions){ a.style.display = 'flex'; a.innerHTML = ''; actions.forEach(function(b){ var x = document.createElement('button'); x.textContent = b.label; x.className = b.cls||'mCancel'; x.onclick = b.fn; a.appendChild(x); }); }
+    else { a.style.display = 'none'; a.innerHTML = ''; }
+    $('busyModal').classList.add('open');
+  }
+  function hideBusy(){ $('busyModal').classList.remove('open'); }
+  function doSubmit(auto){
+    if(submitting || done) return;          // double-submit guard
+    submitting = true; lastAuto = !!auto;
+    if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
+    $('confirmModal').classList.remove('open');
+    $('mSubmitBtn').disabled = true;
+    showBusy(auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
+    post({ type:'submit', answers:answers, seen:seen, auto:!!auto });
+  }
+  function submitFailed(msg){
+    submitting = false;
+    $('mSubmitBtn').disabled = false;
+    var acts = [{ label:'Retry', cls:'mSubmit', fn:function(){ hideBusy(); doSubmit(lastAuto); } }];
+    if(!lastAuto) acts.unshift({ label:'Back to test', cls:'mCancel', fn:function(){ hideBusy(); startTicker(); } });
+    showBusy(msg || 'Could not submit. Please try again.', acts);
+  }
+
+  /* ---------------- review (result + permanent Q-by-Q) ---------------- */
+  function renderReview(v, fresh){
+    $('introScreen').style.display = 'none'; $('testScreen').style.display = 'none';
+    if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
+    var byIdx = {};
+    (v.answers||[]).forEach(function(a){ if(a && typeof a.questionIndex === 'number') byIdx[a.questionIndex] = a; });
+    function sel(i){ var a = byIdx[i]; return (a && a.selectedAnswer != null) ? a.selectedAnswer : null; }
+    function wasSeen(i){ var a = byIdx[i]; return !!(a && (a.seen || a.selectedAnswer != null)); }
+    function stateOf(i){
+      var s = sel(i);
+      if(s == null) return wasSeen(i) ? 'unans' : 'notseen';
+      return s === QUESTIONS[i].correct ? 'correct' : 'wrong';
+    }
+    var out = '';
+    var mismatch = (v.answers||[]).length !== N;
+    if(fresh){
+      out += '<div class="banner" style="background:#0f1f14;border-color:#1f6b3a;color:#4ade80">' +
+        (v.kind === 'practice' ? 'Practice result — saved on this device only.' : 'Submitted — your result and review are saved permanently.') + '</div>';
+    }
+    if(mismatch) out += '<div class="banner">This test may have been changed after this attempt was taken, so some questions might not match the recorded answers.</div>';
+    out += '<div class="result"><div class="rmeta">'+h(TITLE)+'</div>';
+    if(v.studentName) out += '<div class="rmeta">Student: <b>'+h(v.studentName)+'</b></div>';
+    out += '<div class="rmeta">'+h(v.label||'')+(v.submittedAtMs ? ' · '+h(fmtDate(v.submittedAtMs)) : '')+'</div>';
+    out += '<div class="score">'+num(v.score)+'</div><div class="rmeta">out of '+num(v.total)+'</div>';
+    out += '<div class="chips"><span class="chip c-ok">\u2713 '+v.correct+' correct</span><span class="chip c-no">\u2717 '+v.wrong+' wrong</span><span class="chip c-un">\u2014 '+v.skipped+' unanswered</span></div></div>';
+
+    out += '<div class="palette" id="rvPalette">';
+    for(var i=0;i<N;i++){
+      var st = stateOf(i);
+      var pc = st==='correct' ? 'rc' : st==='wrong' ? 'rw' : st==='unans' ? 'ru' : 'rn';
+      out += '<button class="pb '+pc+'" data-i="'+i+'">'+(i+1)+'</button>';
+    }
+    out += '</div><div class="legend"><span><i style="background:rgba(34,197,94,.3)"></i>Correct</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:rgba(239,68,68,.12);border-color:#ef4444"></i>Seen, unanswered</span><span><i style="background:#1c2333"></i>Not seen</span></div>';
+
+    QUESTIONS.forEach(function(q, i){
+      var st = stateOf(i), s = sel(i);
+      var stText = st==='correct' ? 'Correct' :
+                   st==='wrong' ? 'Wrong \u2014 your answer: '+KEYS[s]+' \u00b7 correct: '+KEYS[q.correct] :
+                   st==='unans' ? 'Unanswered (you saw this question)' : 'Unanswered (not seen)';
+      var b = '<div class="sol '+st+'" id="rq'+i+'"><div class="q-num">Question '+(i+1)+'</div>';
+      if(q.text) b += '<div class="q-text">'+q.text+'</div>';
+      if(q.imageUrl) b += '<div class="rq-image"><img src="'+h(q.imageUrl)+'" alt=""><div class="imgerr" style="display:none;font-size:12px;color:#ef4444">Image failed to load</div></div>';
+      b += '<div class="st '+st+'">'+stText+'</div>';
+      for(var k=0;k<4;k++){
+        var ot = (q.options && q.options[k]) ? q.options[k] : '';
+        var oc = 'ropt' + (k===q.correct ? ' correct' : '') + ((s===k && k!==q.correct) ? ' wrongpick' : '');
+        var tags = '';
+        if(k===q.correct) tags += '<span class="tag ok">Correct answer</span>';
+        if(s===k) tags += '<span class="tag '+(k===q.correct?'ok':'no')+'">Your answer</span>';
+        b += '<div class="'+oc+'"><div class="key">'+KEYS[k]+'</div><div class="otext">'+ot+'</div>'+tags+'</div>';
+      }
+      var hasEx = (q.explainText && String(q.explainText).trim()) || (q.explainImageUrl && String(q.explainImageUrl).trim()) || (q.explainUrl && String(q.explainUrl).trim());
+      if(hasEx){
+        b += '<div class="explain-box"><b>Explanation</b>';
+        if(q.explainText) b += '<div>'+q.explainText+'</div>';
+        if(q.explainImageUrl) b += '<img src="'+h(q.explainImageUrl)+'" alt=""><div class="imgerr" style="display:none;font-size:12px;color:#ef4444">Image failed to load</div>';
+        if(q.explainUrl) b += '<a class="explain-link" href="'+h(q.explainUrl)+'" target="_blank" rel="noopener noreferrer">Open explanation link</a>';
+        b += '</div>';
+      }
+      out += b + '</div>';
+    });
+    var rs = $('reviewScreen');
+    rs.innerHTML = out; rs.style.display = 'block';
+    window.scrollTo(0,0);
+    typeset(rs);
+  }
+
+  /* ---------------- wiring ---------------- */
+  $('quizArea').addEventListener('click', function(e){ var o = e.target.closest('.opt'); if(o) selectOpt(parseInt(o.getAttribute('data-i'),10)); });
+  $('palette').addEventListener('click', function(e){ var b = e.target.closest('.pb'); if(b) jump(parseInt(b.getAttribute('data-i'),10)); });
+  $('reviewScreen').addEventListener('click', function(e){
+    var b = e.target.closest('.pb'); if(!b) return;
+    var t = document.getElementById('rq'+b.getAttribute('data-i')); if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
+  });
+  $('prevB').onclick = function(){ if(cur>0 && !submitting){ cur--; renderQ(); } };
+  $('nextB').onclick = function(){ if(submitting||done) return; if(cur<N-1){ cur++; renderQ(); } else { openConfirm(); } };
+  $('mCancelBtn').onclick = function(){ $('confirmModal').classList.remove('open'); };
+  $('mSubmitBtn').onclick = function(){ doSubmit(false); };
+  $('startBtn').onclick = function(){
+    if(started) return;
+    if(mode === 'attempt'){
+      $('startBtn').disabled = true; $('startBtn').textContent = 'Starting\u2026'; $('startErr').textContent = '';
+      post({ type:'start' });
+    } else {
+      begin({ deadlineMs:0 });
+    }
+  };
+  window.addEventListener('message', function(e){
+    if(e.source !== window.parent) return;
+    var m = e.data; if(!m || m.tms !== 1) return;
+    if(m.type === 'started'){ begin({ deadlineMs: m.deadlineMs || 0 }); }
+    else if(m.type === 'startFailed'){ $('startBtn').disabled = false; $('startBtn').textContent = 'Start Test'; $('startErr').textContent = m.message || 'Could not start.'; }
+    else if(m.type === 'submitted'){ done = true; submitting = false; hideBusy(); renderReview(m.view, true); }
+    else if(m.type === 'submitFailed'){ submitFailed(m.message); }
+  });
+
+  if(mode === 'review'){
+    renderReview(BOOT.review, false);
+  } else {
+    renderIntro();
+    if(BOOT.resume){
+      begin(BOOT.resume);
+      flash(BOOT.resume.restored ? 'Attempt resumed \u2014 your answers and position were restored.'
+                                 : 'Attempt resumed. Saved answers weren\u2019t found on this device, so you are continuing the same attempt with the timer running from its original start.');
+    }
+  }
+}
+
+function buildTestHTML(meta, questions, boot){
+  // Defends against a script-closing tag anywhere in admin-entered
+  // text/JSON prematurely closing the <script> tag when the browser's
+  // HTML parser scans this generated page — same escaping trick this
+  // project already uses for the outer template's own closing tags.
+  const jsSafe = v => JSON.stringify(v).replace(/<\/script/gi, '<\\/script');
+  const qData = jsSafe(questions);
+  const correctMark = meta.correctMark ?? 4;
+  const wrongMark = meta.wrongMark ?? -1;
+  const layout = meta.answerButtonLayout || 'grid2x2';
+  const layoutClass = layout==='horizontal' ? 'layout-h' : layout==='vertical' ? 'layout-v' : 'layout-grid';
+  const bootData = jsSafe(boot || { mode:'practice', durationMin: meta.duration||0, fullMarks: 0, perCorrect: correctMark, perWrong: wrongMark, resume: null });
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script>window.MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']]}};<\/script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" defer><\/script>
+<style>${TMS_PLAYER_CSS}</style></head>
+<body oncontextmenu="return false">
+${TMS_PLAYER_BODY}
 <script>
 const QUESTIONS = ${qData};
 const CORRECT_MARK = ${correctMark}, WRONG_MARK = ${wrongMark};
@@ -2699,147 +3567,9 @@ const LAYOUT_CLASS = '${layoutClass}';
 const TITLE = ${jsSafe(meta.title||'Test')};
 const SUBJECT = ${jsSafe(meta.subject||'')};
 const DURATION_MIN = ${meta.duration||0};
-let cur = 0;
-let answers = new Array(QUESTIONS.length).fill(-1);
-let secondsLeft = ${durationSec};
-let submitted = false;
-let started = false;
-let timerHandle = null;
-
-function h(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-function renderIntro(){
-  document.getElementById('introTitle').textContent = TITLE;
-  var bits = [];
-  if(SUBJECT) bits.push(SUBJECT);
-  bits.push(QUESTIONS.length + (QUESTIONS.length===1?' question':' questions'));
-  if(DURATION_MIN>0) bits.push(DURATION_MIN+' min');
-  document.getElementById('introMeta').textContent = bits.join(' · ');
-  document.getElementById('hdrTitle').textContent = TITLE;
-}
-
-function renderQ(){
-  var q = QUESTIONS[cur];
-  var keys=['A','B','C','D'];
-  var parts = '<div class="q-card"><div class="q-num">Question '+(cur+1)+' of '+QUESTIONS.length+'</div>';
-  if(q.text){ parts += '<div class="q-text">'+q.text+'</div>'; }
-  if(q.imageUrl){
-    parts += '<div class="q-image"><img src="'+h(q.imageUrl)+'" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'block\\'"><div class="imgerr" style="display:none">Image failed to load</div></div>';
-  }
-  if(q.questionUrl){
-    parts += '<a class="q-link" href="'+h(q.questionUrl)+'" target="_blank" rel="noopener noreferrer">🔗 View reference</a>';
-  }
-  var hasAnyOptText = q.options && q.options.some(function(o){ return o && o.trim(); });
-  parts += '<div class="opts '+LAYOUT_CLASS+'">';
-  for(var i=0;i<4;i++){
-    var optText = (q.options && q.options[i]) ? q.options[i] : '';
-    var cls = 'opt'+(answers[cur]===i?' sel':'')+(!hasAnyOptText?' noTextOpt':'');
-    parts += '<div class="'+cls+'" onclick="selectOpt('+i+')"><div class="key">'+keys[i]+'</div>'+(optText?'<div>'+optText+'</div>':'')+'</div>';
-  }
-  parts += '</div></div>';
-  document.getElementById('quizArea').innerHTML = parts;
-  if(window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([document.getElementById('quizArea')]);
-  renderPalette();
-  updateHeader();
-  updateNavButtons();
-}
-function selectOpt(i){ answers[cur]=i; renderQ(); }
-function renderPalette(){
-  document.getElementById('palette').innerHTML = QUESTIONS.map(function(_,i){
-    var cls = i===cur ? 'cur' : (answers[i]!==-1 ? 'done' : '');
-    return '<button class="pb '+cls+'" onclick="jump('+i+')">'+(i+1)+'</button>';
-  }).join('');
-}
-function jump(i){ cur=i; renderQ(); }
-function updateHeader(){
-  document.getElementById('hdrProgress').textContent = 'Question '+(cur+1)+' of '+QUESTIONS.length;
-  var pct = Math.round(((cur+1)/QUESTIONS.length)*100);
-  document.getElementById('progFill').style.width = pct+'%';
-}
-function updateNavButtons(){
-  document.getElementById('prevB').disabled = (cur===0);
-  var nextB = document.getElementById('nextB');
-  if(cur === QUESTIONS.length-1){ nextB.textContent = 'Submit Test'; nextB.classList.add('submitStyle'); }
-  else { nextB.textContent = 'Next →'; nextB.classList.remove('submitStyle'); }
-}
-document.getElementById('prevB').onclick=function(){ if(cur>0){cur--;renderQ();} };
-document.getElementById('nextB').onclick=function(){
-  if(cur<QUESTIONS.length-1){ cur++; renderQ(); }
-  else { openConfirm(); }
-};
-
-function openConfirm(){
-  var answered = answers.filter(function(a){ return a!==-1; }).length;
-  var unanswered = QUESTIONS.length - answered;
-  var msg = 'You have answered '+answered+' of '+QUESTIONS.length+' questions.<br>';
-  msg += unanswered>0 ? (unanswered+' question'+(unanswered===1?'':'s')+' unanswered.<br><br>Submit your test?') : '<br>Submit your test?';
-  document.getElementById('confirmText').innerHTML = msg;
-  document.getElementById('confirmModal').classList.add('open');
-}
-document.getElementById('mCancelBtn').onclick=function(){ document.getElementById('confirmModal').classList.remove('open'); };
-document.getElementById('mSubmitBtn').onclick=function(){ document.getElementById('confirmModal').classList.remove('open'); submitTest(); };
-
-function startTest(){
-  if(started) return; started = true;
-  document.getElementById('introScreen').style.display='none';
-  document.getElementById('testScreen').style.display='block';
-  if(secondsLeft > 0){
-    timerHandle = setInterval(function(){
-      secondsLeft--;
-      var m = Math.floor(secondsLeft/60).toString().padStart(2,'0');
-      var s = (secondsLeft%60).toString().padStart(2,'0');
-      var tEl = document.getElementById('tm'); if(tEl) tEl.textContent = m+':'+s;
-      if(secondsLeft<=0){ submitTest(); }
-    }, 1000);
-  } else {
-    document.getElementById('tm').textContent = 'No limit';
-  }
-  renderQ();
-}
-document.getElementById('startBtn').onclick = startTest;
-
-function submitTest(){
-  if(submitted) return; submitted = true;
-  if(timerHandle) clearInterval(timerHandle);
-  document.getElementById('confirmModal').classList.remove('open');
-  var correct=0, wrong=0, skipped=0;
-  QUESTIONS.forEach(function(q,i){
-    if(answers[i]===-1) skipped++;
-    else if(answers[i]===q.correct) correct++;
-    else wrong++;
-  });
-  var score = correct*CORRECT_MARK + wrong*WRONG_MARK;
-  var total = QUESTIONS.length*CORRECT_MARK;
-  document.getElementById('testScreen').style.display='none';
-  var keys=['A','B','C','D'];
-  var reviewHtml = QUESTIONS.map(function(q,i){
-    var a = answers[i];
-    var cls = a===-1?'skip':(a===q.correct?'correct':'wrong');
-    var statusText = a===-1?'Skipped':(a===q.correct?('Correct — '+keys[a]):('Your answer: '+keys[a]+' · Correct: '+keys[q.correct]));
-    var body = '<div class="sol '+cls+'"><div class="q-num">Q'+(i+1)+'</div>';
-    if(q.text){ body += '<div class="q-text">'+q.text+'</div>'; }
-    if(q.imageUrl){ body += '<div class="rq-image"><img src="'+h(q.imageUrl)+'" onerror="this.style.display=\\'none\\'"></div>'; }
-    body += '<div style="font-size:12px;margin:6px 0;font-weight:700">'+statusText+'</div>';
-    var hasExplain = (q.explainText && q.explainText.trim()) || (q.explainImageUrl && q.explainImageUrl.trim()) || (q.explainUrl && q.explainUrl.trim());
-    if(hasExplain){
-      body += '<div class="explain-box">';
-      if(q.explainText){ body += '<div>'+q.explainText+'</div>'; }
-      if(q.explainImageUrl){ body += '<img src="'+h(q.explainImageUrl)+'" onerror="this.style.display=\\'none\\'">'; }
-      if(q.explainUrl){ body += '<a class="explain-link" href="'+h(q.explainUrl)+'" target="_blank" rel="noopener noreferrer">View Explanation / Reference</a>'; }
-      body += '</div>';
-    }
-    body += '</div>';
-    return body;
-  }).join('');
-  document.getElementById('resultScreen').style.display='block';
-  document.getElementById('resultScreen').innerHTML =
-    '<div class="result"><div style="font-size:13px;color:#8b949e">'+h(TITLE)+'</div><div style="font-size:13px;color:#8b949e;margin-top:4px">Your score</div><div class="score">'+score+'</div><div style="font-size:12px;color:#8b949e">out of '+total+' · '+correct+' correct, '+wrong+' wrong, '+skipped+' skipped</div></div>'+reviewHtml;
-  if(window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([document.getElementById('resultScreen')]);
-  window.parent.postMessage({ type:'submit_test', score:score, total:total }, '*');
-}
-
-renderIntro();
+const BOOT = ${bootData};
 <\/script>
+<script>(${tmsPlayerMain.toString()})();<\/script>
 </body></html>`;
 }
 
@@ -3356,6 +4086,7 @@ async function permanentlyDeleteStudent(studentId){
   await deleteAllByQuery(db.collection(COL.students).doc(studentId).collection(COL.payments));
   await deleteAllByQuery(db.collection(COL.enrollments).where('studentId','==',studentId));
   await deleteAllByQuery(db.collection(COL.testResults).where('studentId','==',studentId));
+  await deleteAllByQuery(db.collection(COL.testAttempts).where('studentId','==',studentId));
   await deleteAllByQuery(db.collection(COL.upgradeRequests).where('studentId','==',studentId));
   await deleteAllByQuery(db.collection(COL.batchJoinRequests).where('studentId','==',studentId));
 
@@ -3756,8 +4487,31 @@ function openTestResults(t){
     rows.sort((a,b)=> b.score - a.score);
     box.innerHTML='';
     rows.forEach((r,i)=>{
-      box.appendChild(el(`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
-        <span>#${i+1} ${esc(r.studentName||'Student')}</span><span style="font-weight:700">${esc(r.score)}/${esc(r.total)}</span></div>`));
+      const canReview = !!r.attemptId;   // rows from before Phase 1 have no attempt record to review
+      const row = el(`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
+        <div style="min-width:0;flex:1">
+          <div>#${i+1} ${esc(r.studentName||'Student')}${r.attemptNumber?` <span class="badge badge-muted">${esc(attemptLabel(r.attemptNumber))}</span>`:''}</div>
+          <div style="font-size:11px;color:var(--text-dim)">${esc(fmtDateTime(tsToMs(r.submittedAt)))}${canReview?` · ✓ ${esc(r.correct)} · ✗ ${esc(r.wrong)} · — ${esc(r.skipped)}`:''}</div>
+        </div>
+        <span style="font-weight:700">${esc(fmtMarks(r.score))}/${esc(fmtMarks(r.total))}</span>
+        ${canReview?`<button class="btn-sm btn-ghost" data-rv="1">Review</button>`:''}
+      </div>`);
+      const rv = $('[data-rv]', row);
+      if(rv) rv.addEventListener('click', async ()=>{
+        rv.disabled = true;
+        try{
+          const def = getTestDef(t);
+          if(!def.engine){ toast('Review isn\u2019t available for this test.'); return; }
+          const snapA = await db.collection(COL.testAttempts).doc(r.attemptId).get();
+          if(!snapA.exists || snapA.data().testId !== t.id){ toast('Attempt record not found.'); return; }
+          const a = { id: snapA.id, ...snapA.data() };
+          if(a.status !== 'completed'){ toast('This attempt has not been submitted.'); return; }
+          openAttemptReview(t, def, attemptToView(a, def, { studentName: r.studentName || '' }));
+        }catch(e){
+          console.error(e); toast('Could not load this attempt.');
+        }finally{ rv.disabled = false; }
+      });
+      box.appendChild(row);
     });
   });
 }
@@ -3773,7 +4527,7 @@ function drawManualBuilder(body){
         <div class="field"><label>Batch</label><select id="mBatch"><option value="">Select batch...</option></select></div>
       </div>
       <div class="row2">
-        <div class="field"><label>Type</label><select id="mType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice (no timer)</option></select></div>
+        <div class="field"><label>Type</label><select id="mType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Regular</option><option value="practice" selected>📚 Practice (no timer)</option></select></div>
         <div class="field"><label>Duration (mins, 0 = no timer)</label><input type="number" id="mDuration" value="30"></div>
       </div>
       <div class="row2">
@@ -3891,6 +4645,11 @@ function drawManualBuilder(body){
       title, subject, batchId, batchName,
       type: $('#mType',body).value,
       duration: meta.duration, questionCount: questions.length, answerButtonLayout,
+      // Structured scoring/timing config read by the Phase 1 attempt engine (additive — htmlContent is unchanged)
+      marksPerQuestion: meta.correctMark,
+      negativeMarksPerQuestion: Math.max(0, -meta.wrongMark),
+      totalMarks: Math.round(questions.length * meta.correctMark * 100) / 100,
+      durationMinutes: meta.duration,
       htmlContent: html, source: 'manual',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
@@ -3912,7 +4671,7 @@ function drawPasteForm(body){
         <div class="field"><label>Subject</label><input id="pSubject" placeholder="Physics"></div>
         <div class="field"><label>Batch</label><select id="pBatch"><option value="">Select batch...</option></select></div>
       </div>
-      <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Self-paced</option><option value="practice" selected>📚 Practice</option></select></div>
+      <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Regular</option><option value="practice" selected>📚 Practice</option></select></div>
       <div class="field"><label>Paste full HTML code</label><textarea id="pHtml" style="min-height:130px;font-family:monospace;font-size:11px"></textarea></div>
       <button class="btn btn-primary" id="publishPaste">🚀 Publish to Firebase</button>
     </div>`));
