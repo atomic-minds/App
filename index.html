@@ -2202,12 +2202,22 @@ function openVideoPlayer(v){
       </div>
     </div>`);
   document.body.appendChild(overlay);
-  const timer = setInterval(()=>{
-    db.collection(COL.students).doc(CURRENT_USER.uid).update({
-      watchMinutes: firebase.firestore.FieldValue.increment(0.5)
-    }).catch(()=>{});
-  }, 30000);
-  $('#closePlayer', overlay).addEventListener('click', ()=>{ clearInterval(timer); overlay.remove(); });
+  // Local watch-time tracking: no periodic Firestore writes while the
+  // player is open. Elapsed session time is accumulated in memory and
+  // written to watchMinutes ONCE, when the viewing session ends.
+  const watchStartedAt = Date.now();
+  let watchTimeSaved = false;
+  function saveWatchTime(){
+    if(watchTimeSaved) return;
+    watchTimeSaved = true;
+    const elapsedMinutes = Math.round(((Date.now() - watchStartedAt) / 60000) * 100) / 100;
+    if(elapsedMinutes > 0){
+      db.collection(COL.students).doc(CURRENT_USER.uid).update({
+        watchMinutes: firebase.firestore.FieldValue.increment(elapsedMinutes)
+      }).catch(()=>{});
+    }
+  }
+  $('#closePlayer', overlay).addEventListener('click', ()=>{ saveWatchTime(); overlay.remove(); });
 }
 
 /* ================================================================
@@ -2693,18 +2703,52 @@ async function tmsResumeAttemptById(attemptId, testId, extra){
     }, extra || {}));
   }catch(e){
     console.error('[test-engine] resume failed:', e);
-    toast('Could not resume — check your connection and try again.');
+    // The expired-attempt auto-finish path (tmsPaintResumeCard) retries quietly on its own schedule —
+    // a scary toast here would fire with no tap behind it, so it only shows for a real button tap.
+    if(!(extra && extra.silentError)) toast('Could not resume — check your connection and try again.');
     return false;
   }
 }
 
+// True once an unfinished attempt's timer has already run out. Deliberately ignores the small local
+// clock-offset correction the interactive player applies (that's for seconds of drift, not hours) —
+// this only needs to be right to within a few seconds, since the player's own tick() is authoritative
+// once it opens. Practice and untimed tests never expire this way.
+function tmsAttemptExpired(attempt, test){
+  if(!test) return false;
+  const def = getTestDef(test);
+  if(!def.engine || testKind(test) === 'practice' || !(def.durationMin > 0)) return false;
+  const startedMs = tsToMs(attempt.startedAt);
+  if(startedMs == null) return false;
+  return Date.now() > startedMs + def.durationMin*60000;
+}
+
 // Dashboard card for an unfinished attempt. Reopening the app after closing it lands on the
-// Dashboard as normal; this card is how the student continues (never forced, never auto-submitted).
+// Dashboard as normal; a still-timed attempt gets its usual Resume button. One whose timer already
+// ran out while the app was closed gets NO resume option at all — Firebase Spark has no server-side
+// timer to submit it while the app is closed, but the instant the app runs again (this card painting
+// is that moment) it finishes the attempt itself, the same way a 4th violation auto-submits, with no
+// tap needed and no chance to keep answering past time.
 function tmsPaintResumeCard(slot){
   const paint = items => {
     if(!slot.isConnected) return;
     slot.innerHTML = '';
     items.forEach(({ attempt, test }) => {
+      if(tmsAttemptExpired(attempt, test)){
+        slot.appendChild(el(`<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
+          <div style="font-weight:700;font-size:14px;color:var(--warning)">⏰ Time's up</div>
+          <div style="font-size:14px;font-weight:600;margin:4px 0 2px">${esc((test && test.title) || 'Your test')}</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">${esc(attemptLabel(attempt.attemptNumber))} · finishing this automatically\u2026</div>
+        </div>`));
+        // Same resume mechanism as a normal Resume tap; the player's own timer sees the deadline has
+        // passed and submits immediately (showing "Time is up — submitting your test…") instead of
+        // ever showing the question screen. A failure (e.g. genuinely offline) stays silent — the
+        // repaint below just leaves the "finishing automatically…" card up until the next Dashboard
+        // load (app reopen, or navigating back to it) tries again.
+        tmsResumeAttemptById(attempt.id, attempt.testId, { autoResumed:true, silentError:true })
+          .then(() => { if(slot.isConnected) tmsLoadUnfinished(true).then(paint); });
+        return;
+      }
       const card = el(`<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
         <div style="font-weight:700;font-size:14px;color:var(--warning)">⏳ Unfinished test</div>
         <div style="font-size:14px;font-weight:600;margin:4px 0 2px">${esc((test && test.title) || 'Your test')}</div>
@@ -3051,6 +3095,8 @@ function openTestHub(t, ctx){
   function paint(list){
     const dur = (!isPractice && def.durationMin) ? (' · ' + def.durationMin + ' min') : '';
     const lw = liveWindowState(t);
+    let inprogExpired = false;
+    let inprog = null;
     let html = `<div class="card">
       <div style="font-size:16px;font-weight:700">${esc(t.title || 'Untitled test')}</div>
       <div class="item-meta">${esc(t.subject || '')}${t.subject ? ' · ' : ''}${def.questions.length} Qs${dur} · Full marks ${esc(fmtMarks(def.fullMarks))}</div>
@@ -3068,10 +3114,17 @@ function openTestHub(t, ctx){
                <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">Unlimited attempts. Practice results stay in this browser only and are not shared with your teacher.</div>`;
     } else {
       const done = list.filter(a => a.status === 'completed');
-      const inprog = list.find(a => a.status === 'in-progress');
+      inprog = list.find(a => a.status === 'in-progress');
       const legacy = ctx.legacy(t.id);
       html += `<div class="card-title" style="margin:12px 0 4px">Attempts: ${list.length}/${TEST_MAX_ATTEMPTS}</div>`;
-      if(inprog){
+      inprogExpired = !!(inprog && tmsAttemptExpired(inprog, t));
+      if(inprogExpired){
+        // Same reasoning as the Dashboard card: no button, no chance to keep answering past time —
+        // this fires as soon as the hub is opened, the same way a 4th violation auto-submits.
+        html += `<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
+          <div style="font-weight:700;font-size:14px;color:var(--warning)">⏰ Time's up</div>
+          <div style="font-size:12px;color:var(--text-muted);margin:4px 0 0;line-height:1.5">${esc(attemptLabel(inprog.attemptNumber))} is finishing automatically\u2026</div></div>`;
+      } else if(inprog){
         html += `<div class="card" style="border-color:var(--warning-brd);background:var(--warning-bg)">
           <div style="font-weight:700;font-size:14px;color:var(--warning)">You have an unfinished attempt. Resume?</div>
           <div style="font-size:12px;color:var(--text-muted);margin:4px 0 10px;line-height:1.5">${esc(attemptLabel(inprog.attemptNumber))} (attempt ${inprog.attemptNumber}) is still in progress. Resuming does not use another attempt. Review of earlier attempts stays locked until you submit it.</div>
@@ -3096,6 +3149,10 @@ function openTestHub(t, ctx){
       }
     }
     body.innerHTML = html;
+    // Same fire-immediately, no-button treatment as the Dashboard card (see tmsPaintResumeCard) —
+    // launchTestPlayer here has no error toast of its own, so a network hiccup just leaves the
+    // "finishing automatically…" card showing until the hub is reopened or the Dashboard picks it up.
+    if(!isPractice && inprogExpired) play({ attempt: inprog, autoResumed:true });
 
     const startBtn = $('#hubStart', body);
     if(startBtn) startBtn.addEventListener('click', () => {
