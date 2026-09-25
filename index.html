@@ -766,7 +766,7 @@ function renderAuthScreen(){
         <div class="field"><label>Full name *</label><input type="text" id="rName" required placeholder="Your full name"></div>
         <div class="field"><label>Email *</label><input type="email" id="rEmail" required placeholder="you@example.com"></div>
         <div class="field"><label>Phone number *</label><input type="tel" id="rPhone" required placeholder="10-digit mobile number"></div>
-        <div class="field"><label>Password *</label><input type="password" id="rPass" required placeholder="Minimum 6 characters"></div>
+        <div class="field"><label>Password *</label><input type="password" id="rPass" autocomplete="new-password" required placeholder="Minimum 6 characters"></div>
         <div class="optional-toggle" id="optToggle">+ Add class, location &amp; more (optional)</div>
         <div class="optional-fields" id="optFields">
           <div class="field"><label>Class</label><input type="text" id="rClass" placeholder="e.g. 12"></div>
@@ -2581,13 +2581,11 @@ function tmsShowWarning(root, kind, onOk){
 
 const tmsFsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
 function tmsRequestFs(elm){
-  try{
-    const fn = elm.requestFullscreen || elm.webkitRequestFullscreen;
-    if(!fn) return false;
-    const p = fn.call(elm);
-    if(p && p.catch) p.catch(() => {});
-    return true;
-  }catch(e){ return false; }
+  /* Phase 2: the browser Fullscreen API is intentionally not used. On Android Chrome it triggers the
+     browser's own "drag from the top to exit full screen" toast, which the app cannot control. The
+     test stays immersive inside the app: the overlay covers the TMS navigation, and the Back guard,
+     refresh handling, Wake Lock and violation counter are unchanged. */
+  return false;
 }
 function tmsExitFs(){
   try{
@@ -3354,7 +3352,7 @@ function driveIdFromUrl(url){
    real-time. */
 function loadActiveBatchesInto(selectEl){
   selectEl.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">🎁 Free Demo — All Students</option>`));
-  db.collection(COL.batches).where('status','==','active').get().then(snap=>{
+  return db.collection(COL.batches).where('status','==','active').get().then(snap=>{
     const batches = []; snap.forEach(d=> batches.push({id:d.id, name:d.data().name||'(unnamed batch)'}));
     batches.sort((a,b)=> a.name.localeCompare(b.name));
     batches.forEach(b=> selectEl.appendChild(el(`<option value="${esc(b.id)}">${esc(b.name)}</option>`)));
@@ -4874,7 +4872,7 @@ function drawLiveForm(body){
 }
 
 function renderAdminTests(container){
-  const tabs = el(`<div class="tab-filter"><button data-s="manual">🛠 Manual builder</button><button data-s="paste">📋 Paste HTML</button></div>`);
+  const tabs = el(`<div class="tab-filter"><button data-s="manual">🛠 Manual builder</button><button data-s="paste">📝 Text generator</button></div>`);
   container.appendChild(tabs);
   const body = el(`<div></div>`);
   container.appendChild(body);
@@ -4886,7 +4884,7 @@ function renderAdminTests(container){
     $all('button',tabs).forEach(x=>x.classList.toggle('active',x===b));
     draw();
   });
-  function draw(){ body.innerHTML=''; if(sub==='manual') drawManualBuilder(body); else drawPasteForm(body); }
+  function draw(){ body.innerHTML=''; if(sub==='manual') drawManualBuilder(body); else drawTextGenerator(body); }
   draw();
 
   container.appendChild(el(`<div class="card-title" style="margin:14px 0 8px">Published tests</div>`));
@@ -4904,12 +4902,17 @@ function renderAdminTests(container){
           <div class="item-badges"><span class="badge badge-accent">${esc(t.type)}</span>${t.access==='paid'?'<span class="badge badge-paid">Paid</span>':'<span class="badge badge-free">Free</span>'}</div>
         </div></div>
         <div class="item-actions">
+          ${Array.isArray(t.questions) && t.questions.length ? `
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
+          <button class="btn-sm btn-ghost" data-act="dup">${icon('layers',15)}<span>Duplicate</span></button>` : ''}
           <button class="btn-sm btn-ghost" data-act="results">${icon('chart',15)}<span>Results</span></button>
           <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
       $all('button',card).forEach(b=>b.addEventListener('click', async ()=>{
         if(b.dataset.act==='del'){ await db.collection(COL.tests).doc(t.id).delete(); toast('Deleted'); }
+        else if(b.dataset.act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
+        else if(b.dataset.act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
         else { openTestResults(t); }
       }));
       listBox.appendChild(card);
@@ -5063,6 +5066,10 @@ function drawManualBuilder(body){
         <div class="field"><label>Type</label><select id="mType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Regular</option><option value="practice" selected>📚 Practice (no timer)</option></select></div>
         <div class="field"><label>Duration (mins, 0 = no timer)</label><input type="number" id="mDuration" value="30"></div>
       </div>
+      <div class="row2" id="mLiveBox" style="display:none">
+        <div class="field"><label>Live starts (date &amp; time)</label><input type="datetime-local" id="mLiveStart"></div>
+        <div class="field"><label>Live ends (date &amp; time)</label><input type="datetime-local" id="mLiveEnd"></div>
+      </div>
       <div class="row2">
         <div class="field"><label>Correct marks</label><input type="number" id="mCorrect" value="4"></div>
         <div class="field"><label>Wrong marks</label><input type="number" id="mWrong" value="-1"></div>
@@ -5085,7 +5092,6 @@ function drawManualBuilder(body){
         <input id="mQImage" placeholder="https://drive.google.com/file/d/.../view">
         <img id="mQImagePreview" style="display:none;max-width:100%;max-height:160px;border-radius:8px;margin-top:8px" onload="this.style.display='block'" onerror="this.style.display='none'">
       </div>
-      <div class="field"><label>Question reference link (optional)</label><input id="mQLink" placeholder="https://example.com/reference"></div>
       <div class="row2">
         <div class="field"><label>Option A (optional)</label><input id="mOptA"></div>
         <div class="field"><label>Option B (optional)</label><input id="mOptB"></div>
@@ -5101,12 +5107,12 @@ function drawManualBuilder(body){
         <input id="mExplainImage" placeholder="https://drive.google.com/file/d/.../view">
         <img id="mExplainImagePreview" style="display:none;max-width:100%;max-height:160px;border-radius:8px;margin-top:8px" onload="this.style.display='block'" onerror="this.style.display='none'">
       </div>
-      <div class="field"><label>Explanation / reference link (optional)</label><input id="mExplainLink" placeholder="https://example.com/reference"></div>
       <button class="btn btn-ghost" id="addQ">+ Add question</button>
     </div>
     <button class="btn btn-primary" id="publishManual">🚀 Generate &amp; publish test</button>
   </div>`));
   loadActiveBatchesInto($('#mBatch', body));
+  $('#mType',body).addEventListener('change', ()=>{ $('#mLiveBox',body).style.display = $('#mType',body).value==='live' ? '' : 'none'; });
 
   // Live admin-side preview for pasted image URLs — reuses the same
   // resolveImageUrl() Drive-link resolver already used by banners/notes,
@@ -5142,17 +5148,15 @@ function drawManualBuilder(body){
     const explainImageRaw = $('#mExplainImage',body).value.trim();
     questions.push({
       text, imageUrl,
-      questionUrl: $('#mQLink',body).value.trim(),
       options,
       correct: parseInt($('#mCorrectOpt',body).value),
       explainText: $('#mExplainText',body).value.trim(),
-      explainImageUrl: explainImageRaw ? resolveImageUrl(explainImageRaw) : '',
-      explainUrl: $('#mExplainLink',body).value.trim()
+      explainImageUrl: explainImageRaw ? resolveImageUrl(explainImageRaw) : ''
     });
-    $('#mQText',body).value=''; $('#mQImage',body).value=''; $('#mQLink',body).value='';
+    $('#mQText',body).value=''; $('#mQImage',body).value='';
     $('#mOptA',body).value=''; $('#mOptB',body).value=''; $('#mOptC',body).value=''; $('#mOptD',body).value='';
     $('#mCorrectOpt',body).value='0';
-    $('#mExplainText',body).value=''; $('#mExplainImage',body).value=''; $('#mExplainLink',body).value='';
+    $('#mExplainText',body).value=''; $('#mExplainImage',body).value='';
     $('#mQImagePreview',body).style.display='none'; $('#mExplainImagePreview',body).style.display='none';
     refreshQList(); toast('Question added');
   });
@@ -5173,21 +5177,449 @@ function drawManualBuilder(body){
       duration: parseInt($('#mDuration',body).value)||0,
       answerButtonLayout
     };
-    const html = buildTestHTML(meta, questions);
-    await db.collection(COL.tests).add({
-      title, subject, batchId, batchName,
-      type: $('#mType',body).value,
-      duration: meta.duration, questionCount: questions.length, answerButtonLayout,
-      // Structured scoring/timing config read by the Phase 1 attempt engine (additive — htmlContent is unchanged)
-      marksPerQuestion: meta.correctMark,
-      negativeMarksPerQuestion: Math.max(0, -meta.wrongMark),
-      totalMarks: Math.round(questions.length * meta.correctMark * 100) / 100,
-      durationMinutes: meta.duration,
-      htmlContent: html, source: 'manual',
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    toast('✅ Test published to Firebase!');
+    const type = $('#mType',body).value;
+    const live = readLiveSchedule(type, $('#mLiveStart',body).value, $('#mLiveEnd',body).value);
+    if(live.error){ toast(live.error); return; }
+    if(!await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions, live })) return;
     questions = []; refreshQList(); $('#mTitle',body).value=''; batchSel.value='';
+  });
+}
+
+/* ---------- Phase 2: shared publish path (Manual Builder + Text Generator) ---------- */
+function readLiveSchedule(type, sVal, eVal){
+  if(type !== 'live') return { start:null, end:null };
+  if(!sVal || !eVal) return { error:'Live tests need a start and an end date & time.' };
+  const s = new Date(sVal).getTime(), e = new Date(eVal).getTime();
+  if(isNaN(s) || isNaN(e)) return { error:'Enter a valid live start and end time.' };
+  if(s >= e) return { error:'Live start must be earlier than live end.' };
+  return { start:s, end:e };
+}
+const TEST_MAX_QUESTIONS = 100, TEST_MAX_BYTES = 900000;
+async function publishNormalizedTest(o){
+  const { title, subject, batchId, batchName, type, meta, questions, live } = o;
+  // Only definition data is stored, once, as structured questions[] (same field names the engine reads).
+  // The player page is built at runtime by buildTestHTML(); no htmlContent blob is saved for new tests.
+  const stored = questions.map(q => ({ text:q.text, imageUrl:q.imageUrl, options:q.options, correct:q.correct, explainText:q.explainText, explainImageUrl:q.explainImageUrl }));
+  if(new Blob([JSON.stringify(stored)]).size > TEST_MAX_BYTES){
+    toast('This test is too large to store safely (about 900 KB limit). Shorten the text or remove images, or split it into two tests. Nothing was saved.');
+    return false;
+  }
+  const docData = {
+    title, subject, batchId, batchName, type,
+    duration: meta.duration, questionCount: questions.length, answerButtonLayout: meta.answerButtonLayout,
+    marksPerQuestion: meta.correctMark,
+    negativeMarksPerQuestion: Math.max(0, -meta.wrongMark),
+    totalMarks: Math.round(questions.length * meta.correctMark * 100) / 100,
+    durationMinutes: meta.duration,
+    questions: stored, source: o.source || 'manual',
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+  if(live && live.start != null){
+    docData.liveStartAt = firebase.firestore.Timestamp.fromMillis(live.start);
+    docData.liveEndAt = firebase.firestore.Timestamp.fromMillis(live.end);
+  }
+  await db.collection(COL.tests).add(docData);
+  toast('✅ Test published to Firebase!');
+  return true;
+}
+
+/* ---------- Phase 2: Edit Test + Duplicate Test ----------
+   Edit/Duplicate only ever operate on tests that already carry a structured
+   top-level questions[] array (the new architecture). Legacy tests — pasted
+   HTML, or older Manual Builder tests that only have QUESTIONS embedded in
+   htmlContent — get neither button (see renderAdminTests) and are left
+   exactly as they are; this app is still pre-production and those documents
+   are not worth carrying extra migration/compatibility complexity for. */
+
+function msToLocalInput(ms){
+  if(ms == null) return '';
+  const d = new Date(ms), pad = n => String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+}
+
+/* A test is historically locked once at least one Live/Regular attempt has been
+   SUBMITTED — an in-progress attempt alone does not lock it. Practice never locks:
+   it never writes testAttempts, so there is nothing to check. */
+async function hasCompletedAttempts(testId){
+  const snap = await db.collection(COL.testAttempts).where('testId','==',testId).where('status','==','completed').limit(1).get();
+  return !snap.empty;
+}
+
+/* Same field set/shape as publishNormalizedTest, but updates an existing test
+   document in place instead of creating one. Only ever called on a test that
+   is NOT historically locked, so every field below is safe to overwrite. */
+async function updateNormalizedTest(testId, o){
+  const { title, subject, batchId, batchName, type, meta, questions, live } = o;
+  const stored = questions.map(q => ({ text:q.text, imageUrl:q.imageUrl, options:q.options, correct:q.correct, explainText:q.explainText, explainImageUrl:q.explainImageUrl }));
+  if(new Blob([JSON.stringify(stored)]).size > TEST_MAX_BYTES){
+    toast('This test is too large to store safely (about 900 KB limit). Shorten the text or remove images, or split it into two tests. Nothing was saved.');
+    return false;
+  }
+  const docData = {
+    title, subject, batchId, batchName, type,
+    duration: meta.duration, questionCount: questions.length, answerButtonLayout: meta.answerButtonLayout,
+    marksPerQuestion: meta.correctMark,
+    negativeMarksPerQuestion: Math.max(0, -meta.wrongMark),
+    totalMarks: Math.round(questions.length * meta.correctMark * 100) / 100,
+    durationMinutes: meta.duration,
+    questions: stored,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+  docData.liveStartAt = (live && live.start != null) ? firebase.firestore.Timestamp.fromMillis(live.start) : firebase.firestore.FieldValue.delete();
+  docData.liveEndAt   = (live && live.end   != null) ? firebase.firestore.Timestamp.fromMillis(live.end)   : firebase.firestore.FieldValue.delete();
+  await db.collection(COL.tests).doc(testId).update(docData);
+  toast('✅ Test updated');
+  return true;
+}
+
+/* Fields that stay editable even after a test is historically locked — purely
+   descriptive/cosmetic, so changing them cannot affect scoring, question
+   meaning/order, timing, historical review, or attempt validity. Everything
+   else (batch, type, schedule, duration, marks, questions) is locked. */
+async function updateSafeMetadataOnly(testId, { title, subject, answerButtonLayout }){
+  await db.collection(COL.tests).doc(testId).update({ title, subject, answerButtonLayout, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+  toast('✅ Test updated');
+  return true;
+}
+
+function openEditTestSheet(t, opts){
+  const dup = !!(opts && opts.duplicate);
+  const overlay = el(`<div class="overlay open"><div class="sheet" style="max-height:94vh;overflow-y:auto">
+    <div class="sheet-handle"></div><button class="sheet-close" id="eClose">✕</button><div style="clear:both"></div>
+    <div class="card-title">${dup ? '📄 Duplicate test' : '✏️ Edit test'}</div>
+    <div id="eBody"><div class="spinner"></div></div>
+  </div></div>`);
+  document.body.appendChild(overlay);
+  $('#eClose', overlay).addEventListener('click', ()=> overlay.remove());
+  const eBody = $('#eBody', overlay);
+
+  (async () => {
+    const locked = dup ? false : (testKind(t) === 'practice' ? false : await hasCompletedAttempts(t.id).catch(()=>false));
+    eBody.innerHTML = '';
+
+    if(locked){
+      eBody.appendChild(el(`<div class="card" style="border-color:var(--warning,#f59e0b)">
+        <div style="display:flex;gap:8px;align-items:flex-start"><span style="flex-shrink:0">${icon('lock',18)}</span>
+        <div style="font-size:12px;line-height:1.6">This test already has submitted attempts. Question content, scoring, timing, batch, type and the live schedule are locked to preserve historical results — only the title, subject and answer layout can still be changed. Use <b>Duplicate</b> to create an editable copy for a revised version.</div></div>
+      </div>`));
+    }
+
+    eBody.appendChild(el(`<div>
+      <div class="card">
+        <div class="card-title">📋 Test details</div>
+        <div class="field"><label>Title</label><input id="eTitle" value="${esc(dup ? (t.title||'') + ' — Copy' : (t.title||''))}"></div>
+        <div class="row2">
+          <div class="field"><label>Subject</label><input id="eSubject" value="${esc(t.subject||'')}"></div>
+          <div class="field"><label>Batch</label><select id="eBatch" ${locked?'disabled':''}></select></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Type</label><select id="eType" ${locked?'disabled':''}>
+            <option value="live">🔴 Live</option><option value="selfpaced">⏱ Regular</option><option value="practice">📚 Practice (no timer)</option>
+          </select></div>
+          <div class="field"><label>Duration (mins, 0 = no timer)</label><input type="number" id="eDuration" value="${esc(t.durationMinutes ?? t.duration ?? 30)}" ${locked?'disabled':''}></div>
+        </div>
+        <div class="row2" id="eLiveBox" style="display:none">
+          <div class="field"><label>Live starts (date &amp; time)</label><input type="datetime-local" id="eLiveStart" ${locked?'disabled':''}></div>
+          <div class="field"><label>Live ends (date &amp; time)</label><input type="datetime-local" id="eLiveEnd" ${locked?'disabled':''}></div>
+        </div>
+        ${dup ? `<div class="field hint" id="eLiveDupHint" style="display:none;margin-top:-6px">This is a copy — set a fresh live schedule before publishing it.</div>` : ''}
+        <div class="row2">
+          <div class="field"><label>Correct marks</label><input type="number" id="eCorrect" value="${esc(t.marksPerQuestion ?? 4)}" ${locked?'disabled':''}></div>
+          <div class="field"><label>Wrong marks</label><input type="number" id="eWrong" value="${esc(-(t.negativeMarksPerQuestion ?? 0))}" ${locked?'disabled':''}></div>
+        </div>
+        <div class="field"><label>Answer button layout</label>
+          <select id="eLayout">
+            <option value="grid2x2">2 × 2 grid</option><option value="horizontal">Horizontal (A B C D in a row)</option><option value="vertical">Vertical (stacked)</option>
+          </select>
+        </div>
+      </div>
+      <div class="card" id="eQCard" ${locked?'style="display:none"':''}>
+        <div class="card-title">❓ Questions <span id="eQCountLbl" style="color:var(--text-dim);font-weight:400;font-size:11px"></span></div>
+        <div id="eQList"></div>
+        <div class="field"><label>Question text (optional) — supports $LaTeX$, &lt;img src="..."&gt;, raw &lt;svg&gt;</label>
+          <textarea id="eQText" placeholder="Leave blank if the image below already contains the full question."></textarea>
+        </div>
+        <div class="field"><label>Question image URL (optional — Google Drive share links supported)</label>
+          <input id="eQImage" placeholder="https://drive.google.com/file/d/.../view">
+          <img id="eQImagePreview" style="display:none;max-width:100%;max-height:160px;border-radius:8px;margin-top:8px" onload="this.style.display='block'" onerror="this.style.display='none'">
+        </div>
+        <div class="row2">
+          <div class="field"><label>Option A (optional)</label><input id="eOptA"></div>
+          <div class="field"><label>Option B (optional)</label><input id="eOptB"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Option C (optional)</label><input id="eOptC"></div>
+          <div class="field"><label>Option D (optional)</label><input id="eOptD"></div>
+        </div>
+        <div class="field"><label>Correct option</label><select id="eCorrectOpt"><option value="0">A</option><option value="1">B</option><option value="2">C</option><option value="3">D</option></select></div>
+        <div class="field"><label>Explanation text (optional, shown after submit)</label><textarea id="eExplainText"></textarea></div>
+        <div class="field"><label>Explanation image URL (optional)</label>
+          <input id="eExplainImage" placeholder="https://drive.google.com/file/d/.../view">
+          <img id="eExplainImagePreview" style="display:none;max-width:100%;max-height:160px;border-radius:8px;margin-top:8px" onload="this.style.display='block'" onerror="this.style.display='none'">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="eAddQ">+ Add question</button>
+          <button class="btn btn-ghost" id="eCancelEdit" style="display:none">Cancel edit</button>
+        </div>
+      </div>
+      ${locked ? `<div class="card"><div class="card-title">❓ Questions <span style="color:var(--text-dim);font-weight:400;font-size:11px">(${(t.questions||[]).length} — locked)</span></div>
+        <div style="font-size:12px;color:var(--text-muted)">Duplicate this test to edit its questions.</div></div>` : ''}
+      <button class="btn btn-primary" id="eSave">${dup ? '📄 Create duplicate' : '💾 Save changes'}</button>
+    </div>`));
+
+    const typeSel = $('#eType', overlay);
+    typeSel.value = (t.type === 'selfpaced' || t.type === 'regular') ? 'selfpaced' : (t.type === 'live' ? 'live' : 'practice');
+    $('#eLayout', overlay).value = t.answerButtonLayout || 'grid2x2';
+
+    const batchSel = $('#eBatch', overlay);
+    loadActiveBatchesInto(batchSel).then(()=>{ batchSel.value = t.batchId || GENERAL_BATCH_ID; });
+
+    function syncLiveBox(){
+      const isLive = typeSel.value === 'live';
+      $('#eLiveBox', overlay).style.display = isLive ? '' : 'none';
+      const hint = $('#eLiveDupHint', overlay); if(hint) hint.style.display = (isLive && dup) ? '' : 'none';
+    }
+    typeSel.addEventListener('change', syncLiveBox);
+    syncLiveBox();
+    if(!dup && t.type === 'live'){
+      $('#eLiveStart', overlay).value = msToLocalInput(tsToMs(t.liveStartAt));
+      $('#eLiveEnd', overlay).value = msToLocalInput(tsToMs(t.liveEndAt));
+    }
+    // A duplicate never inherits the old schedule — always confirmed fresh (see spec §13).
+
+    if(locked){
+      $('#eSave',overlay).addEventListener('click', async ()=>{
+        const title = $('#eTitle',overlay).value.trim();
+        if(!title){ toast('Enter a test title'); return; }
+        const ok = await updateSafeMetadataOnly(t.id, { title, subject: $('#eSubject',overlay).value.trim(), answerButtonLayout: $('#eLayout',overlay).value });
+        if(ok) overlay.remove();
+      });
+      return; // nothing below this point is reachable when fields are disabled/hidden
+    }
+
+    let questions = (t.questions || []).map(q => ({ ...q, options: (q.options||[]).slice(0,4) }));
+    let editingIndex = null;
+
+    function wireImagePreview(inputId, imgId){
+      const input = $('#'+inputId, overlay), img = $('#'+imgId, overlay);
+      input.addEventListener('input', ()=>{
+        const url = input.value.trim();
+        if(!url){ img.style.display='none'; img.removeAttribute('src'); return; }
+        img.src = resolveImageUrl(url);
+      });
+    }
+    wireImagePreview('eQImage','eQImagePreview');
+    wireImagePreview('eExplainImage','eExplainImagePreview');
+
+    function clearStagingForm(){
+      $('#eQText',overlay).value=''; $('#eQImage',overlay).value='';
+      $('#eOptA',overlay).value=''; $('#eOptB',overlay).value=''; $('#eOptC',overlay).value=''; $('#eOptD',overlay).value='';
+      $('#eCorrectOpt',overlay).value='0';
+      $('#eExplainText',overlay).value=''; $('#eExplainImage',overlay).value='';
+      $('#eQImagePreview',overlay).style.display='none'; $('#eExplainImagePreview',overlay).style.display='none';
+      editingIndex = null;
+      $('#eAddQ',overlay).textContent = '+ Add question';
+      $('#eCancelEdit',overlay).style.display = 'none';
+    }
+
+    function refreshQList(){
+      $('#eQCountLbl',overlay).textContent = '('+questions.length+' added)';
+      const box = $('#eQList',overlay); box.innerHTML='';
+      questions.forEach((q,i)=>{
+        const label = q.text ? (q.text.slice(0,40)+(q.text.length>40?'…':'')) : (q.imageUrl ? '[Image question]' : '[Untitled question]');
+        const row = el(`<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:7px 0;border-bottom:1px solid var(--border-soft);font-size:12px">
+          <span>Q${i+1}. ${esc(label)}${q.imageUrl?' 🖼':''}</span>
+          <span style="display:flex;gap:4px;flex-shrink:0">
+            <button class="btn-sm btn-ghost" type="button" data-edit aria-label="Edit question">${icon('edit',14)}</button>
+            <button class="btn-sm btn-danger" type="button" data-del aria-label="Remove question">${icon('trash',14)}</button>
+          </span></div>`);
+        $('[data-del]',row).addEventListener('click', ()=>{
+          questions.splice(i,1);
+          if(editingIndex === i) clearStagingForm(); else if(editingIndex != null && editingIndex > i) editingIndex--;
+          refreshQList();
+        });
+        $('[data-edit]',row).addEventListener('click', ()=>{
+          editingIndex = i;
+          $('#eQText',overlay).value = q.text||''; $('#eQImage',overlay).value = q.imageUrl||'';
+          $('#eOptA',overlay).value = q.options?.[0]||''; $('#eOptB',overlay).value = q.options?.[1]||'';
+          $('#eOptC',overlay).value = q.options?.[2]||''; $('#eOptD',overlay).value = q.options?.[3]||'';
+          $('#eCorrectOpt',overlay).value = String(q.correct ?? 0);
+          $('#eExplainText',overlay).value = q.explainText||''; $('#eExplainImage',overlay).value = q.explainImageUrl||'';
+          $('#eQImagePreview',overlay).style.display = q.imageUrl ? 'block':'none'; if(q.imageUrl) $('#eQImagePreview',overlay).src = resolveImageUrl(q.imageUrl);
+          $('#eExplainImagePreview',overlay).style.display = q.explainImageUrl ? 'block':'none'; if(q.explainImageUrl) $('#eExplainImagePreview',overlay).src = resolveImageUrl(q.explainImageUrl);
+          $('#eAddQ',overlay).textContent = 'Update Q'+(i+1);
+          $('#eCancelEdit',overlay).style.display = '';
+          box.scrollIntoView({ block:'nearest' });
+        });
+        box.appendChild(row);
+      });
+    }
+    refreshQList();
+    $('#eCancelEdit',overlay).addEventListener('click', clearStagingForm);
+    $('#eAddQ',overlay).addEventListener('click', ()=>{
+      const text = $('#eQText',overlay).value.trim();
+      const imageUrlRaw = $('#eQImage',overlay).value.trim();
+      const imageUrl = imageUrlRaw ? resolveImageUrl(imageUrlRaw) : '';
+      if(!text && !imageUrl){ toast('Add question text or an image — at least one is required'); return; }
+      const q = {
+        text, imageUrl,
+        options: [$('#eOptA',overlay).value.trim(), $('#eOptB',overlay).value.trim(), $('#eOptC',overlay).value.trim(), $('#eOptD',overlay).value.trim()],
+        correct: parseInt($('#eCorrectOpt',overlay).value),
+        explainText: $('#eExplainText',overlay).value.trim(),
+        explainImageUrl: (()=>{ const r = $('#eExplainImage',overlay).value.trim(); return r ? resolveImageUrl(r) : ''; })()
+      };
+      if(editingIndex != null) questions[editingIndex] = q; else questions.push(q);
+      clearStagingForm(); refreshQList();
+      toast(editingIndex != null ? 'Question updated' : 'Question added');
+    });
+
+    $('#eSave',overlay).addEventListener('click', async ()=>{
+      const title = $('#eTitle',overlay).value.trim();
+      if(!title){ toast('Enter a test title'); return; }
+      if(!questions.length){ toast('Add at least one question'); return; }
+      const batchId = batchSel.value;
+      if(!batchId){ toast('Select a batch'); return; }
+      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+      const subject = $('#eSubject',overlay).value.trim();
+      const answerButtonLayout = $('#eLayout',overlay).value;
+      const type = typeSel.value;
+      const meta = {
+        title, subject,
+        correctMark: parseFloat($('#eCorrect',overlay).value)||0,
+        wrongMark: parseFloat($('#eWrong',overlay).value)||0,
+        duration: parseInt($('#eDuration',overlay).value)||0,
+        answerButtonLayout
+      };
+      const live = readLiveSchedule(type, $('#eLiveStart',overlay).value, $('#eLiveEnd',overlay).value);
+      if(live.error){ toast(live.error); return; }
+      const ok = dup
+        ? await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions, live, source:'duplicate' })
+        : await updateNormalizedTest(t.id, { title, subject, batchId, batchName, type, meta, questions, live });
+      if(ok) overlay.remove();
+    });
+  })();
+}
+
+/* ---------- Phase 2: Text Test Generator parser (runs entirely in the browser) ----------
+   Returns { questions, errors }. Questions use the same shape as the Manual Builder. */
+function parseTestText(raw){
+  const errors = [], blocks = [];
+  const qRe = /^\s*Q\s*(\d+)\s*[.):\-]\s*(.*)$/i;
+  const keyRe = /^\s*(Answer|Ans|Explanation|Question\s*Image|Explanation\s*Image)\s*:\s*(.*)$/i;
+  const optRe = /^\s*\(?([A-Da-d])[.)]\s*(.*)$/;
+  let b = null, cur = null, warnedPre = false;
+  String(raw || '').replace(/\r/g,'').split('\n').forEach((line, ln) => {
+    const qm = line.match(qRe);
+    if(qm){ b = { num:+qm[1], text:[qm[2]], opts:{}, ans:null, exp:[], qimg:null, eimg:null, dup:[] }; blocks.push(b); cur = 'q'; return; }
+    if(!line.trim() && !b) return;
+    if(!b){ if(!warnedPre){ errors.push('Line ' + (ln+1) + ': text found before Q1. Start every question with Q1., Q2., Q3. …'); warnedPre = true; } return; }
+    const km = line.match(keyRe);
+    if(km){
+      const k = km[1].toLowerCase().replace(/\s+/g,''), v = km[2].trim();
+      const f = k === 'answer' || k === 'ans' ? 'ans' : k === 'explanation' ? 'exp' : k === 'questionimage' ? 'qimg' : 'eimg';
+      if((f === 'exp' ? b.exp.some(x=>x) : b[f] !== null)) b.dup.push(km[1]);
+      if(f === 'exp') b.exp = [v]; else b[f] = v;
+      cur = f; return;
+    }
+    const om = (cur === 'q' || 'ABCD'.includes(cur)) ? line.match(optRe) : null;
+    if(om){
+      const L = om[1].toUpperCase();
+      if(b.opts[L] !== undefined) b.dup.push('option ' + L);
+      b.opts[L] = om[2].trim(); cur = L; return;
+    }
+    if(cur === 'q') b.text.push(line.trim());
+    else if(cur === 'exp') b.exp.push(line.trim());
+    else if('ABCD'.includes(cur) && line.trim()) b.opts[cur] += ' ' + line.trim();
+  });
+  if(!blocks.length) errors.push('No questions found. Start every question with Q1., Q2., Q3. …');
+  if(blocks.length > TEST_MAX_QUESTIONS) errors.push('Too many questions (' + blocks.length + '). The limit is ' + TEST_MAX_QUESTIONS + ' per test.');
+  const questions = [], urlOk = u => /^https?:\/\/\S+$/i.test(u);
+  blocks.forEach((q, idx) => {
+    const L = 'Q' + q.num + ': ', e = m => errors.push(L + m);
+    if(q.num !== idx + 1) e('question numbering must run 1, 2, 3 … (expected Q' + (idx+1) + ' here).');
+    q.dup.forEach(d => e('"' + d + '" appears more than once.'));
+    const text = q.text.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+    const qimg = (q.qimg || '').trim(), eimg = (q.eimg || '').trim();
+    if(!text && !qimg) e('missing question text or Question Image.');
+    if(qimg && !urlOk(qimg)) e('Question Image must be a full http(s) link.');
+    if(eimg && !urlOk(eimg)) e('Explanation Image must be a full http(s) link.');
+    const have = 'ABCD'.split('').filter(l => (q.opts[l] || '').trim());
+    if(!(have.length === 0 && qimg)) 'ABCD'.split('').forEach(l => { if(!have.includes(l)) e('missing option ' + l + '.'); });
+    let correct = -1;
+    if(q.ans === null || q.ans === '') e('missing Answer.');
+    else { const am = q.ans.trim().match(/^\(?([A-Da-d])\)?\.?$/); if(am) correct = 'ABCD'.indexOf(am[1].toUpperCase()); else e('Answer must be A, B, C or D.'); }
+    questions.push({
+      text, imageUrl: qimg && urlOk(qimg) ? resolveImageUrl(qimg) : '',
+      options: 'ABCD'.split('').map(l => (q.opts[l] || '').trim()), correct,
+      explainText: q.exp.join('\n').trim(), explainImageUrl: eimg && urlOk(eimg) ? resolveImageUrl(eimg) : ''
+    });
+  });
+  return { questions, errors };
+}
+
+function drawTextGenerator(body){
+  body.appendChild(el(`
+    <div class="card">
+      <div class="card-title">📝 Create test from text</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+        Paste plain text — no HTML needed. Each question: <b style="color:var(--text)">Q1.</b> text, options <b style="color:var(--text)">A.</b> to <b style="color:var(--text)">D.</b>, then <b style="color:var(--text)">Answer:</b> and optional <b style="color:var(--text)">Explanation:</b>, <b style="color:var(--text)">Question Image:</b>, <b style="color:var(--text)">Explanation Image:</b>. Up to ${TEST_MAX_QUESTIONS} questions.
+      </div>
+      <div class="field"><label>Title</label><input id="tgTitle" placeholder="Full Test - 01"></div>
+      <div class="row2">
+        <div class="field"><label>Subject</label><input id="tgSubject" placeholder="Chemistry"></div>
+        <div class="field"><label>Batch</label><select id="tgBatch"><option value="">Select batch...</option></select></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Type</label><select id="tgType"><option value="live">🔴 Live</option><option value="selfpaced" selected>⏱ Regular</option><option value="practice">📚 Practice (no timer)</option></select></div>
+        <div class="field"><label>Duration (mins, 0 = no timer)</label><input type="number" id="tgDuration" value="30" min="0"></div>
+      </div>
+      <div class="row2" id="tgLiveBox" style="display:none">
+        <div class="field"><label>Live starts (date &amp; time)</label><input type="datetime-local" id="tgLiveStart"></div>
+        <div class="field"><label>Live ends (date &amp; time)</label><input type="datetime-local" id="tgLiveEnd"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Marks per question</label><input type="number" id="tgCorrect" value="4" min="0" step="0.25"></div>
+        <div class="field"><label>Negative marks per wrong answer</label><input type="number" id="tgNeg" value="1" min="0" step="0.25"></div>
+      </div>
+      <div class="field"><label>Answer button layout</label>
+        <select id="tgLayout"><option value="grid2x2" selected>2 × 2 grid</option><option value="horizontal">Horizontal (A B C D in a row)</option><option value="vertical">Vertical (stacked)</option></select>
+      </div>
+      <div class="field"><label>Test text</label><textarea id="tgText" style="min-height:220px;font-size:13px" placeholder="Q1. Which element has atomic number 17?&#10;A. Sodium&#10;B. Chlorine&#10;C. Potassium&#10;D. Calcium&#10;Answer: B&#10;Explanation: Chlorine has atomic number 17."></textarea></div>
+      <div id="tgResult" style="font-size:12px;line-height:1.6;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" id="tgCheck">Check text</button>
+        <button class="btn btn-primary" id="tgPublish">🚀 Generate &amp; publish test</button>
+      </div>
+    </div>`));
+  loadActiveBatchesInto($('#tgBatch', body));
+  $('#tgType',body).addEventListener('change', ()=>{ $('#tgLiveBox',body).style.display = $('#tgType',body).value==='live' ? '' : 'none'; });
+  const correctMark = () => parseFloat($('#tgCorrect',body).value) || 0;
+  function check(){
+    const r = parseTestText($('#tgText',body).value), box = $('#tgResult',body);
+    if(r.errors.length){
+      box.innerHTML = '<div style="color:var(--danger,#ef4444)"><b>Fix these before publishing (' + r.errors.length + '):</b><br>' + r.errors.slice(0,40).map(esc).join('<br>') + (r.errors.length>40 ? '<br>…and ' + (r.errors.length-40) + ' more.' : '') + '</div>';
+      return null;
+    }
+    box.innerHTML = '<div style="color:var(--success,#22c55e)">✓ ' + r.questions.length + ' questions ready · full marks ' + (Math.round(r.questions.length*correctMark()*100)/100) + '</div>';
+    return r;
+  }
+  $('#tgCheck',body).addEventListener('click', check);
+  $('#tgPublish',body).addEventListener('click', async ()=>{
+    const title = $('#tgTitle',body).value.trim();
+    if(!title){ toast('Enter a test title'); return; }
+    const batchSel = $('#tgBatch',body), batchId = batchSel.value;
+    if(!batchId){ toast('Select a batch'); return; }
+    const marks = correctMark(), neg = Math.abs(parseFloat($('#tgNeg',body).value) || 0);
+    if(!(marks > 0)){ toast('Marks per question must be greater than 0'); return; }
+    const type = $('#tgType',body).value;
+    const live = readLiveSchedule(type, $('#tgLiveStart',body).value, $('#tgLiveEnd',body).value);
+    if(live.error){ toast(live.error); return; }
+    const r = check(); if(!r) return;
+    const subject = $('#tgSubject',body).value.trim();
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const meta = { title, subject, correctMark: marks, wrongMark: -neg, duration: Math.max(0, parseInt($('#tgDuration',body).value) || 0), answerButtonLayout: $('#tgLayout',body).value };
+    if(!await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions: r.questions, live, source:'text' })) return;
+    $('#tgTitle',body).value=''; $('#tgText',body).value=''; $('#tgResult',body).innerHTML=''; batchSel.value='';
   });
 }
 
