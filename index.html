@@ -5538,8 +5538,18 @@ function parseTestText(raw){
     const L = 'Q' + q.num + ': ', e = m => errors.push(L + m);
     if(q.num !== idx + 1) e('question numbering must run 1, 2, 3 … (expected Q' + (idx+1) + ' here).');
     q.dup.forEach(d => e('"' + d + '" appears more than once.'));
-    const text = q.text.join('\n').replace(/\n{3,}/g,'\n\n').trim();
-    const qimg = (q.qimg || '').trim(), eimg = (q.eimg || '').trim();
+    let text = q.text.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+    let qimg = (q.qimg || '').trim();
+    let explainText = q.exp.join('\n').trim();
+    let eimg = (q.eimg || '').trim();
+    // A question/explanation typed as nothing but a bare link (no "Question Image:"/
+    // "Explanation Image:" label used) is still meant as an image, not literal text —
+    // Manual Builder's image field accepts a raw link the same way, with no label at
+    // all, so the Text Generator should treat one exactly the same instead of showing
+    // the link as flat text.
+    const bareUrl = s => { const m = /^(https?:\/\/\S+)$/i.exec(s); return m ? m[1] : null; };
+    if(!qimg){ const b = bareUrl(text); if(b){ qimg = b; text = ''; } }
+    if(!eimg){ const b = bareUrl(explainText); if(b){ eimg = b; explainText = ''; } }
     if(!text && !qimg) e('missing question text or Question Image.');
     if(qimg && !urlOk(qimg)) e('Question Image must be a full http(s) link.');
     if(eimg && !urlOk(eimg)) e('Explanation Image must be a full http(s) link.');
@@ -5551,7 +5561,7 @@ function parseTestText(raw){
     questions.push({
       text, imageUrl: qimg && urlOk(qimg) ? resolveImageUrl(qimg) : '',
       options: 'ABCD'.split('').map(l => (q.opts[l] || '').trim()), correct,
-      explainText: q.exp.join('\n').trim(), explainImageUrl: eimg && urlOk(eimg) ? resolveImageUrl(eimg) : ''
+      explainText, explainImageUrl: eimg && urlOk(eimg) ? resolveImageUrl(eimg) : ''
     });
   });
   return { questions, errors };
