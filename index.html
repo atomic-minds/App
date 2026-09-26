@@ -431,6 +431,43 @@ function $all(sel, root){ return Array.from((root||document).querySelectorAll(se
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstElementChild; }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+/* ---- shared input validation (registration + profile editing) ----
+   One place decides what counts as a valid full name / Indian mobile
+   number / email, so registration and profile-edit never drift apart
+   or duplicate slightly-different regexes. Each returns
+   {ok:true, value} with the value normalized for storage, or
+   {ok:false, error} with a user-facing message. */
+function validateFullName(name){
+  // Trim outer whitespace and collapse repeated internal spaces — this
+  // is the one automatic modification allowed; nothing else about the
+  // name is invented or altered. Requires at least two space-separated
+  // words; each word may contain internal hyphens/apostrophes (e.g.
+  // "Anne-Marie", "O'Brien") so legitimate names aren't rejected, but a
+  // single hyphenated token with no space (e.g. "Ayan-Paul") still isn't
+  // a two-word name and is still rejected.
+  const normalized = (name||'').trim().replace(/\s+/g,' ');
+  const WORD = "[A-Za-z]+(?:['-][A-Za-z]+)*";
+  const re = new RegExp('^' + WORD + '(?:\\s' + WORD + ')+$');
+  if(!re.test(normalized)){
+    return { ok:false, error:'Enter a full name — first and last name (e.g. "Ayan Paul").' };
+  }
+  return { ok:true, value:normalized };
+}
+function validateIndianMobile(phone, opts){
+  const trimmed = (phone||'').trim();
+  if(!trimmed) return (opts && opts.optional) ? { ok:true, value:'' } : { ok:false, error:'Enter a valid 10-digit phone number.' };
+  if(!/^\d{10}$/.test(trimmed)) return { ok:false, error:'Enter a valid 10-digit phone number.' };
+  return { ok:true, value:trimmed };
+}
+function validateEmail(email){
+  const trimmed = (email||'').trim();
+  // Deliberately simple, standard check — not a full RFC 5322 parser.
+  // Firebase Authentication performs its own authoritative validation
+  // on top of this at account-creation time.
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return { ok:false, error:'Enter a valid email address.' };
+  return { ok:true, value:trimmed };
+}
+
 /* -------- shared icon system --------
    One small inline-SVG set replaces the interface/decorative emoji this
    app used to render as plain text (nav, drawer, dashboard, action
@@ -767,10 +804,10 @@ function renderAuthScreen(){
         <div class="field"><label>Email *</label><input type="email" id="rEmail" required placeholder="you@example.com"></div>
         <div class="field"><label>Phone number *</label><input type="tel" id="rPhone" required placeholder="10-digit mobile number"></div>
         <div class="field"><label>Password *</label><input type="password" id="rPass" autocomplete="new-password" required placeholder="Minimum 6 characters"></div>
-        <div class="optional-toggle" id="optToggle">+ Add class, location &amp; more (optional)</div>
+        <div class="optional-toggle" id="optToggle">+ Add class, address &amp; more (optional)</div>
         <div class="optional-fields" id="optFields">
           <div class="field"><label>Class</label><input type="text" id="rClass" placeholder="e.g. 12"></div>
-          <div class="field"><label>Location</label><input type="text" id="rLocation" placeholder="e.g. Duttapukur"></div>
+          <div class="field"><label>Address</label><textarea id="rAddress" placeholder="House/street, area"></textarea></div>
           <div class="row2">
             <div class="field"><label>School</label><input type="text" id="rSchool" placeholder="School name"></div>
             <div class="field"><label>Date of birth</label><input type="date" id="rDob"></div>
@@ -789,25 +826,28 @@ function renderAuthScreen(){
     form.addEventListener('submit', async e=>{
       e.preventDefault();
       errBox.classList.remove('show');
-      const name = $('#rName',form).value.trim();
-      const email = $('#rEmail',form).value.trim();
-      const phone = $('#rPhone',form).value.trim();
+      const nameCheck = validateFullName($('#rName',form).value);
+      if(!nameCheck.ok){ errBox.textContent = nameCheck.error; errBox.classList.add('show'); return; }
+      const emailCheck = validateEmail($('#rEmail',form).value);
+      if(!emailCheck.ok){ errBox.textContent = emailCheck.error; errBox.classList.add('show'); return; }
+      const phoneCheck = validateIndianMobile($('#rPhone',form).value);
+      if(!phoneCheck.ok){ errBox.textContent = phoneCheck.error; errBox.classList.add('show'); return; }
+      const gPhoneCheck = validateIndianMobile($('#rGPhone',form).value, {optional:true});
+      if(!gPhoneCheck.ok){ errBox.textContent = 'Guardian phone: ' + gPhoneCheck.error; errBox.classList.add('show'); return; }
+      const name = nameCheck.value;
+      const email = emailCheck.value;
+      const phone = phoneCheck.value;
       const pass = $('#rPass',form).value;
-      if(!/^\d{10}$/.test(phone)){
-        errBox.textContent = 'Enter a valid 10-digit phone number.';
-        errBox.classList.add('show');
-        return;
-      }
       const btn = $('#regBtn', form); btn.disabled = true; btn.textContent = 'Creating account…';
       try{
         await doRegister({
           fullName:name, email, phone, password:pass,
           class: $('#rClass',form).value.trim(),
-          location: $('#rLocation',form).value.trim(),
+          address: $('#rAddress',form).value.trim(),
           school: $('#rSchool',form).value.trim(),
           dob: $('#rDob',form).value,
           guardianName: $('#rGName',form).value.trim(),
-          guardianPhone: $('#rGPhone',form).value.trim(),
+          guardianPhone: gPhoneCheck.value,
         });
       }catch(err){
         errBox.textContent = friendlyAuthError(err);
@@ -1024,7 +1064,7 @@ async function doRegister(data){
     phone: data.phone,
     class: data.class || '',
     batch: data.batch || '',
-    location: data.location || '',
+    address: data.address || '',
     school: data.school || '',
     dob: data.dob || '',
     guardianName: data.guardianName || '',
@@ -3506,17 +3546,63 @@ function renderProfileTab(container){
   `));
   container.appendChild(el(`
     <div class="card">
-      <div class="card-title">👤 Your details</div>
-      <div style="font-size:12px;color:var(--text-muted);line-height:2">
-        Phone: <b style="color:var(--text)">${esc(p.phone||'—')}</b><br>
-        Class: <b style="color:var(--text)">${esc(p.class||'—')}</b><br>
-        Batch: <b style="color:var(--text)">${esc(p.batch||'—')}</b><br>
-        Location: <b style="color:var(--text)">${esc(p.location||'—')}</b><br>
-        School: <b style="color:var(--text)">${esc(p.school||'—')}</b><br>
-        Watch time: <b style="color:var(--text)">${Math.round(p.watchMinutes||0)} mins</b>
+      <div class="card-title">👤 Profile information</div>
+      <div class="field"><label>Full Name</label><input id="pfFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Ayan Paul"></div>
+      <div class="field">
+        <label>🔒 Email</label>
+        <input type="text" value="${esc(p.email||'')}" disabled style="opacity:.6;cursor:not-allowed">
+        <div class="hint">Controlled by your login — can't be changed here.</div>
       </div>
+      <div class="field"><label>Phone Number</label><input id="pfPhone" type="tel" value="${esc(p.phone||'')}" placeholder="10-digit mobile number"></div>
+      <div class="field"><label>Class</label><input id="pfClass" type="text" value="${esc(p.class||'')}"></div>
+      <div class="field">
+        <label>🔒 Batch</label>
+        <input type="text" value="${esc(p.batch||'—')}" disabled style="opacity:.6;cursor:not-allowed">
+        <div class="hint">Set by your teacher via batch enrollment — can't be changed here.</div>
+      </div>
+      <div class="field"><label>School</label><input id="pfSchool" type="text" value="${esc(p.school||'')}"></div>
+      <div class="row2">
+        <div class="field"><label>Parent/Guardian Name</label><input id="pfGName" type="text" value="${esc(p.guardianName||'')}"></div>
+        <div class="field"><label>Parent/Guardian Phone</label><input id="pfGPhone" type="tel" value="${esc(p.guardianPhone||'')}"></div>
+      </div>
+      <div class="field"><label>Date of Birth</label><input id="pfDob" type="date" value="${esc(p.dob||'')}"></div>
+      <div class="field"><label>Address</label><textarea id="pfAddress" placeholder="House/street, area">${esc(p.address||'')}</textarea></div>
+      <div id="pfErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:10px"></div>
+      <button class="btn btn-primary" id="pfSaveBtn">💾 Save Changes</button>
     </div>
   `));
+  $('#pfSaveBtn', container).addEventListener('click', async ()=>{
+    const errBox = $('#pfErr', container);
+    errBox.style.display = 'none';
+    const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
+    const nameCheck = validateFullName($('#pfFullName', container).value);
+    if(!nameCheck.ok){ showErr(nameCheck.error); return; }
+    const phoneCheck = validateIndianMobile($('#pfPhone', container).value);
+    if(!phoneCheck.ok){ showErr(phoneCheck.error); return; }
+    const gPhoneCheck = validateIndianMobile($('#pfGPhone', container).value, {optional:true});
+    if(!gPhoneCheck.ok){ showErr('Guardian phone: ' + gPhoneCheck.error); return; }
+    const updates = {
+      fullName: nameCheck.value,
+      phone: phoneCheck.value,
+      class: $('#pfClass', container).value.trim(),
+      guardianName: $('#pfGName', container).value.trim(),
+      guardianPhone: gPhoneCheck.value,
+      dob: $('#pfDob', container).value,
+      address: $('#pfAddress', container).value.trim(),
+      school: $('#pfSchool', container).value.trim(),
+    };
+    const btn = $('#pfSaveBtn', container); btn.disabled = true; btn.textContent = 'Saving…';
+    try{
+      await db.collection(COL.students).doc(CURRENT_USER.uid).update(updates);
+      Object.assign(CURRENT_PROFILE, updates);
+      toast('Profile updated');
+      renderScreen();
+    }catch(err){
+      console.error(err);
+      btn.disabled = false; btn.textContent = '💾 Save Changes';
+      showErr('Could not save — check your connection and try again.');
+    }
+  });
   container.appendChild(el(`
     <div class="card" id="notifCard">
       <div class="card-title">🔔 Browser Notifications</div>
@@ -4107,6 +4193,7 @@ function renderAdminShell(){
     else if(STATE.adminTab==='calendar') renderAdminCalendar(content);
     else if(STATE.adminTab==='banners') renderAdminBanners(content);
     else if(STATE.adminTab==='requests') renderAdminUpgradeRequests(content);
+    else if(STATE.adminTab==='profile') renderAdminProfile(content);
   }
   return shell;
 }
@@ -4123,6 +4210,7 @@ function openAdminDrawer(){
     { key:'calendar', icon:icon('calendar'), label:'Calendar', onSelect:()=>{ STATE.adminTab='calendar'; renderScreen(); } },
     { key:'banners', icon:icon('image'), label:'Dashboard Banners', onSelect:()=>{ STATE.adminTab='banners'; renderScreen(); } },
     { key:'requests', icon:icon('inbox'), label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
+    { key:'profile', icon:icon('user'), label:'My Profile', onSelect:()=>{ STATE.adminTab='profile'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:icon('logout'), label:'Log out', onSelect: doLogout }
   ], STATE.adminTab);
@@ -4149,6 +4237,7 @@ function renderAdminHome(container){
         <span class="ht-icon">${icon('inbox',22)}</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
       </button>
+      <button class="home-tile" data-t="profile"><span class="ht-icon">${icon('user',22)}</span><span class="ht-label">My Profile</span></button>
     </div>
   `);
   grid.addEventListener('click', e=>{
@@ -4166,6 +4255,70 @@ function renderAdminHome(container){
     batchPending = 0; snap.forEach(()=>batchPending++); refreshBadge();
   });
   trackUnsub(unsub2);
+}
+
+/* Teacher/Admin personal profile — same editable personal-info fields
+   as the student profile (fullName/phone/class/school/guardian/dob/
+   address), stored on the admin's own admins/{uid} doc. Email stays
+   Firebase-Auth-controlled and is shown locked, same as for students.
+   There's no Batch field here — batches are a student-only concept —
+   so unlike the student form there is nothing to lock there. */
+function renderAdminProfile(container){
+  const p = CURRENT_PROFILE || {};
+  container.appendChild(el(`
+    <div class="card">
+      <div class="card-title">👤 My Profile</div>
+      <div class="field"><label>Full Name</label><input id="apFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Ayan Paul"></div>
+      <div class="field">
+        <label>🔒 Email</label>
+        <input type="text" value="${esc((CURRENT_USER && CURRENT_USER.email)||'')}" disabled style="opacity:.6;cursor:not-allowed">
+        <div class="hint">Controlled by your login — can't be changed here.</div>
+      </div>
+      <div class="field"><label>Phone Number</label><input id="apPhone" type="tel" value="${esc(p.phone||'')}" placeholder="10-digit mobile number"></div>
+      <div class="field"><label>Class</label><input id="apClass" type="text" value="${esc(p.class||'')}"></div>
+      <div class="field"><label>School</label><input id="apSchool" type="text" value="${esc(p.school||'')}"></div>
+      <div class="row2">
+        <div class="field"><label>Parent/Guardian Name</label><input id="apGName" type="text" value="${esc(p.guardianName||'')}"></div>
+        <div class="field"><label>Parent/Guardian Phone</label><input id="apGPhone" type="tel" value="${esc(p.guardianPhone||'')}"></div>
+      </div>
+      <div class="field"><label>Date of Birth</label><input id="apDob" type="date" value="${esc(p.dob||'')}"></div>
+      <div class="field"><label>Address</label><textarea id="apAddress" placeholder="House/street, area">${esc(p.address||'')}</textarea></div>
+      <div id="apErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:10px"></div>
+      <button class="btn btn-primary" id="apSaveBtn">💾 Save Changes</button>
+    </div>
+  `));
+  $('#apSaveBtn', container).addEventListener('click', async ()=>{
+    const errBox = $('#apErr', container);
+    errBox.style.display = 'none';
+    const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
+    const nameCheck = validateFullName($('#apFullName', container).value);
+    if(!nameCheck.ok){ showErr(nameCheck.error); return; }
+    const phoneCheck = validateIndianMobile($('#apPhone', container).value);
+    if(!phoneCheck.ok){ showErr(phoneCheck.error); return; }
+    const gPhoneCheck = validateIndianMobile($('#apGPhone', container).value, {optional:true});
+    if(!gPhoneCheck.ok){ showErr('Guardian phone: ' + gPhoneCheck.error); return; }
+    const updates = {
+      fullName: nameCheck.value,
+      phone: phoneCheck.value,
+      class: $('#apClass', container).value.trim(),
+      guardianName: $('#apGName', container).value.trim(),
+      guardianPhone: gPhoneCheck.value,
+      dob: $('#apDob', container).value,
+      address: $('#apAddress', container).value.trim(),
+      school: $('#apSchool', container).value.trim(),
+    };
+    const btn = $('#apSaveBtn', container); btn.disabled = true; btn.textContent = 'Saving…';
+    try{
+      await db.collection(COL.admins).doc(CURRENT_USER.uid).update(updates);
+      Object.assign(CURRENT_PROFILE, updates);
+      toast('Profile updated');
+      renderScreen();
+    }catch(err){
+      console.error(err);
+      btn.disabled = false; btn.textContent = '💾 Save Changes';
+      showErr('Could not save — check your connection and try again.');
+    }
+  });
 }
 
 /* Batch-join requests only now — paid-upgrade requests were removed:
@@ -4250,18 +4403,6 @@ function renderAdminBatches(container){
       <div class="field" id="bExpiryDateField" style="display:none"><label>Default expiry date</label><input type="date" id="bExpiryDate"></div>
       <button class="btn btn-primary" id="createBatchBtn">💾 Create batch</button>
     </div>
-    <div class="card">
-      <div class="card-title">🔄 One-time migration</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
-        If students already have an old free-text batch name on their profile, run this once to create a
-        matching batch for each distinct name and enroll those students into it (lifetime expiry, so nobody
-        currently active loses access). This also (re)syncs every student's secure batch-access record from
-        their current enrollments — run it again any time you want to force a resync (e.g. right after
-        deploying this update, so existing students get access without you having to open each one).
-        Safe to run more than once.
-      </div>
-      <button class="btn btn-ghost" id="runMigrationBtn">Migrate batch names &amp; sync access</button>
-    </div>
     <div class="card-title" style="margin:14px 0 8px">All batches</div>
     <div id="batchList"><div class="spinner"></div></div>
   </div>`));
@@ -4290,8 +4431,6 @@ function renderAdminBatches(container){
     toast('Batch created');
     $('#bName',container).value=''; $('#bClass',container).value=''; $('#bDesc',container).value='';
   });
-
-  $('#runMigrationBtn', container).addEventListener('click', ()=> runBatchMigration());
 
   const listBox = $('#batchList', container);
   const unsub = db.collection(COL.batches).onSnapshot(async snap=>{
@@ -4437,61 +4576,6 @@ function openBatchDetail(batch){
   trackUnsub(unsub);
 }
 
-/* One-time, safely re-runnable migration: for every distinct free-text
-   `batch` value already on student profiles, create a matching batch
-   document (if one doesn't already exist) and enroll that student into
-   it with lifetime expiry, so nobody currently active loses access. */
-async function runBatchMigration(){
-  toast('Running migration…');
-  try{
-    const studentsSnap = await db.collection(COL.students).get();
-    const students = []; studentsSnap.forEach(d=> students.push({id:d.id, ...d.data()}));
-    const batchesSnap = await db.collection(COL.batches).get();
-    const existingByName = {};
-    batchesSnap.forEach(d=>{ existingByName[d.data().name] = d.id; });
-
-    let created = 0, enrolled = 0;
-    for(const s of students){
-      const name = (s.batch||'').trim();
-      if(name){
-        let batchId = existingByName[name];
-        if(!batchId){
-          const ref = await db.collection(COL.batches).add({
-            name, description:'', status:'active', defaultExpiryType:'lifetime', defaultExpiresAt:null,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          batchId = ref.id;
-          existingByName[name] = batchId;
-          created++;
-        }
-        const already = await db.collection(COL.enrollments).where('studentId','==',s.id).get();
-        let hasIt = false;
-        already.forEach(d=>{ if(d.data().batchId===batchId) hasIt = true; });
-        if(!hasIt){
-          await db.collection(COL.enrollments).add({
-            studentId: s.id, batchId, batchName: name,
-            status:'active', expiryType:'lifetime', expiresAt:null,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-          enrolled++;
-        }
-      }
-      // (Re)sync every student's rules-checkable activeBatchIds from their
-      // current enrollments, whether or not this run touched them above —
-      // this is what actually gives existing students (created before
-      // Phase D.5) working batch access without an admin opening each one
-      // individually, and is safe to re-run any time as a resync.
-      await syncStudentActiveBatchIds(s.id);
-    }
-    toast(`Migration done — ${created} batch(es) created, ${enrolled} enrolled, ${students.length} student(s) synced.`);
-  }catch(e){
-    console.error(e);
-    toast('Migration failed — check console.');
-  }
-}
-
-
 function renderAdminStudents(container){
   container.appendChild(el(`<div class="search-input-wrap"><span class="si">🔍</span><input type="text" id="stuSearch" placeholder="Search by name or phone..."></div>`));
   const listBox = el(`<div><div class="spinner"></div></div>`);
@@ -4602,7 +4686,7 @@ function openStudentDetail(s){
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${esc(s.email||'')} · ${esc(s.phone||'')}</div>
       <div style="font-size:12px;color:var(--text-muted);line-height:1.9">
         Class: <b style="color:var(--text)">${esc(s.class||'—')}</b><br>
-        Location: <b style="color:var(--text)">${esc(s.location||'—')}</b><br>
+        Address: <b style="color:var(--text)">${esc(s.address||'—')}</b><br>
         Guardian: <b style="color:var(--text)">${esc(s.guardianName||'—')}${s.guardianPhone?(' ('+esc(s.guardianPhone)+')'):''}</b><br>
         Watch time: <b style="color:var(--text)">${Math.round(s.watchMinutes||0)} mins</b>
       </div>
