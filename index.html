@@ -449,7 +449,7 @@ function validateFullName(name){
   const WORD = "[A-Za-z]+(?:['-][A-Za-z]+)*";
   const re = new RegExp('^' + WORD + '(?:\\s' + WORD + ')+$');
   if(!re.test(normalized)){
-    return { ok:false, error:'Enter a full name — first and last name (e.g. "Ayan Paul").' };
+    return { ok:false, error:'Enter a full name — first and last name (e.g. "Virat Kohli").' };
   }
   return { ok:true, value:normalized };
 }
@@ -3547,7 +3547,7 @@ function renderProfileTab(container){
   container.appendChild(el(`
     <div class="card">
       <div class="card-title">👤 Profile information</div>
-      <div class="field"><label>Full Name</label><input id="pfFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Ayan Paul"></div>
+      <div class="field"><label>Full Name</label><input id="pfFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Virat Kohli"></div>
       <div class="field">
         <label>🔒 Email</label>
         <input type="text" value="${esc(p.email||'')}" disabled style="opacity:.6;cursor:not-allowed">
@@ -4193,7 +4193,6 @@ function renderAdminShell(){
     else if(STATE.adminTab==='calendar') renderAdminCalendar(content);
     else if(STATE.adminTab==='banners') renderAdminBanners(content);
     else if(STATE.adminTab==='requests') renderAdminUpgradeRequests(content);
-    else if(STATE.adminTab==='profile') renderAdminProfile(content);
   }
   return shell;
 }
@@ -4210,7 +4209,6 @@ function openAdminDrawer(){
     { key:'calendar', icon:icon('calendar'), label:'Calendar', onSelect:()=>{ STATE.adminTab='calendar'; renderScreen(); } },
     { key:'banners', icon:icon('image'), label:'Dashboard Banners', onSelect:()=>{ STATE.adminTab='banners'; renderScreen(); } },
     { key:'requests', icon:icon('inbox'), label:'Requests', onSelect:()=>{ STATE.adminTab='requests'; renderScreen(); } },
-    { key:'profile', icon:icon('user'), label:'My Profile', onSelect:()=>{ STATE.adminTab='profile'; renderScreen(); } },
     { divider:true },
     { key:'logout', icon:icon('logout'), label:'Log out', onSelect: doLogout }
   ], STATE.adminTab);
@@ -4237,7 +4235,6 @@ function renderAdminHome(container){
         <span class="ht-icon">${icon('inbox',22)}</span><span class="ht-label">Requests</span>
         <span class="ht-badge" id="reqBadge" style="display:none">0</span>
       </button>
-      <button class="home-tile" data-t="profile"><span class="ht-icon">${icon('user',22)}</span><span class="ht-label">My Profile</span></button>
     </div>
   `);
   grid.addEventListener('click', e=>{
@@ -4255,70 +4252,6 @@ function renderAdminHome(container){
     batchPending = 0; snap.forEach(()=>batchPending++); refreshBadge();
   });
   trackUnsub(unsub2);
-}
-
-/* Teacher/Admin personal profile — same editable personal-info fields
-   as the student profile (fullName/phone/class/school/guardian/dob/
-   address), stored on the admin's own admins/{uid} doc. Email stays
-   Firebase-Auth-controlled and is shown locked, same as for students.
-   There's no Batch field here — batches are a student-only concept —
-   so unlike the student form there is nothing to lock there. */
-function renderAdminProfile(container){
-  const p = CURRENT_PROFILE || {};
-  container.appendChild(el(`
-    <div class="card">
-      <div class="card-title">👤 My Profile</div>
-      <div class="field"><label>Full Name</label><input id="apFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Ayan Paul"></div>
-      <div class="field">
-        <label>🔒 Email</label>
-        <input type="text" value="${esc((CURRENT_USER && CURRENT_USER.email)||'')}" disabled style="opacity:.6;cursor:not-allowed">
-        <div class="hint">Controlled by your login — can't be changed here.</div>
-      </div>
-      <div class="field"><label>Phone Number</label><input id="apPhone" type="tel" value="${esc(p.phone||'')}" placeholder="10-digit mobile number"></div>
-      <div class="field"><label>Class</label><input id="apClass" type="text" value="${esc(p.class||'')}"></div>
-      <div class="field"><label>School</label><input id="apSchool" type="text" value="${esc(p.school||'')}"></div>
-      <div class="row2">
-        <div class="field"><label>Parent/Guardian Name</label><input id="apGName" type="text" value="${esc(p.guardianName||'')}"></div>
-        <div class="field"><label>Parent/Guardian Phone</label><input id="apGPhone" type="tel" value="${esc(p.guardianPhone||'')}"></div>
-      </div>
-      <div class="field"><label>Date of Birth</label><input id="apDob" type="date" value="${esc(p.dob||'')}"></div>
-      <div class="field"><label>Address</label><textarea id="apAddress" placeholder="House/street, area">${esc(p.address||'')}</textarea></div>
-      <div id="apErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:10px"></div>
-      <button class="btn btn-primary" id="apSaveBtn">💾 Save Changes</button>
-    </div>
-  `));
-  $('#apSaveBtn', container).addEventListener('click', async ()=>{
-    const errBox = $('#apErr', container);
-    errBox.style.display = 'none';
-    const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
-    const nameCheck = validateFullName($('#apFullName', container).value);
-    if(!nameCheck.ok){ showErr(nameCheck.error); return; }
-    const phoneCheck = validateIndianMobile($('#apPhone', container).value);
-    if(!phoneCheck.ok){ showErr(phoneCheck.error); return; }
-    const gPhoneCheck = validateIndianMobile($('#apGPhone', container).value, {optional:true});
-    if(!gPhoneCheck.ok){ showErr('Guardian phone: ' + gPhoneCheck.error); return; }
-    const updates = {
-      fullName: nameCheck.value,
-      phone: phoneCheck.value,
-      class: $('#apClass', container).value.trim(),
-      guardianName: $('#apGName', container).value.trim(),
-      guardianPhone: gPhoneCheck.value,
-      dob: $('#apDob', container).value,
-      address: $('#apAddress', container).value.trim(),
-      school: $('#apSchool', container).value.trim(),
-    };
-    const btn = $('#apSaveBtn', container); btn.disabled = true; btn.textContent = 'Saving…';
-    try{
-      await db.collection(COL.admins).doc(CURRENT_USER.uid).update(updates);
-      Object.assign(CURRENT_PROFILE, updates);
-      toast('Profile updated');
-      renderScreen();
-    }catch(err){
-      console.error(err);
-      btn.disabled = false; btn.textContent = '💾 Save Changes';
-      showErr('Could not save — check your connection and try again.');
-    }
-  });
 }
 
 /* Batch-join requests only now — paid-upgrade requests were removed:
@@ -4682,14 +4615,20 @@ function openStudentDetail(s){
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeDetail" aria-label="Close">${icon('close')}</button><div style="clear:both"></div>
     <div class="card">
-      <div style="font-size:16px;font-weight:700">${esc(s.fullName)}</div>
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${esc(s.email||'')} · ${esc(s.phone||'')}</div>
-      <div style="font-size:12px;color:var(--text-muted);line-height:1.9">
-        Class: <b style="color:var(--text)">${esc(s.class||'—')}</b><br>
-        Address: <b style="color:var(--text)">${esc(s.address||'—')}</b><br>
-        Guardian: <b style="color:var(--text)">${esc(s.guardianName||'—')}${s.guardianPhone?(' ('+esc(s.guardianPhone)+')'):''}</b><br>
-        Watch time: <b style="color:var(--text)">${Math.round(s.watchMinutes||0)} mins</b>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">${esc(s.email||'')}</div>
+      <div class="field"><label>Full Name</label><input id="sdFullName" type="text" value="${esc(s.fullName||'')}" placeholder="e.g. Virat Kohli"></div>
+      <div class="field"><label>Phone Number</label><input id="sdPhone" type="tel" value="${esc(s.phone||'')}" placeholder="10-digit mobile number"></div>
+      <div class="field"><label>Class</label><input id="sdClass" type="text" value="${esc(s.class||'')}"></div>
+      <div class="field"><label>School</label><input id="sdSchool" type="text" value="${esc(s.school||'')}"></div>
+      <div class="row2">
+        <div class="field"><label>Parent/Guardian Name</label><input id="sdGName" type="text" value="${esc(s.guardianName||'')}"></div>
+        <div class="field"><label>Parent/Guardian Phone</label><input id="sdGPhone" type="tel" value="${esc(s.guardianPhone||'')}"></div>
       </div>
+      <div class="field"><label>Date of Birth</label><input id="sdDob" type="date" value="${esc(s.dob||'')}"></div>
+      <div class="field"><label>Address</label><textarea id="sdAddress" placeholder="House/street, area">${esc(s.address||'')}</textarea></div>
+      <div style="font-size:12px;color:var(--text-muted);margin:2px 0 10px">Watch time: <b style="color:var(--text)">${Math.round(s.watchMinutes||0)} mins</b></div>
+      <div id="sdErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:8px"></div>
+      <button class="btn btn-primary" id="sdSaveBtn" style="width:100%">💾 Save Changes</button>
       <div class="row2" style="margin-top:12px">
         <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${icon(s.active===false?'check':'ban',16)}<span>${s.active===false?'Activate':'Deactivate'}</span></button>
         <button class="btn btn-ghost" id="resetDevice">${icon('refresh',16)}<span>Reset device</span></button>
@@ -4720,6 +4659,38 @@ function openStudentDetail(s){
   document.body.appendChild(overlay);
   let enrollUnsub = null;
   $('#closeDetail', overlay).addEventListener('click', ()=>{ if(enrollUnsub) enrollUnsub(); overlay.remove(); });
+  $('#sdSaveBtn', overlay).addEventListener('click', async ()=>{
+    const errBox = $('#sdErr', overlay);
+    errBox.style.display = 'none';
+    const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
+    const nameCheck = validateFullName($('#sdFullName', overlay).value);
+    if(!nameCheck.ok){ showErr(nameCheck.error); return; }
+    const phoneCheck = validateIndianMobile($('#sdPhone', overlay).value);
+    if(!phoneCheck.ok){ showErr(phoneCheck.error); return; }
+    const gPhoneCheck = validateIndianMobile($('#sdGPhone', overlay).value, {optional:true});
+    if(!gPhoneCheck.ok){ showErr('Guardian phone: ' + gPhoneCheck.error); return; }
+    const updates = {
+      fullName: nameCheck.value,
+      phone: phoneCheck.value,
+      class: $('#sdClass', overlay).value.trim(),
+      school: $('#sdSchool', overlay).value.trim(),
+      guardianName: $('#sdGName', overlay).value.trim(),
+      guardianPhone: gPhoneCheck.value,
+      dob: $('#sdDob', overlay).value,
+      address: $('#sdAddress', overlay).value.trim(),
+    };
+    const btn = $('#sdSaveBtn', overlay); btn.disabled = true; btn.textContent = 'Saving…';
+    try{
+      await db.collection(COL.students).doc(s.id).update(updates);
+      Object.assign(s, updates);
+      toast('Student details updated');
+      btn.disabled = false; btn.textContent = '💾 Save Changes';
+    }catch(err){
+      console.error(err);
+      btn.disabled = false; btn.textContent = '💾 Save Changes';
+      showErr('Could not save — check your connection and try again.');
+    }
+  });
   $('#toggleActive', overlay).addEventListener('click', async ()=>{
     if(s.active===false){
       // Re-activating — just clear the flag and any old reason.
