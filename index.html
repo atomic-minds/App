@@ -3566,31 +3566,43 @@ function renderProfileTab(container){
   container.appendChild(el(`
     <div class="card">
       <div class="card-title">👤 Profile information</div>
-      <div class="field"><label>Full Name</label><input id="pfFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Virat Kohli"></div>
+      <div class="field"><label>Full Name</label><input id="pfFullName" type="text" value="${esc(p.fullName||'')}" placeholder="e.g. Virat Kohli" disabled></div>
       <div class="field">
         <label>🔒 Email</label>
         <input type="text" value="${esc(p.email||'')}" disabled style="opacity:.6;cursor:not-allowed">
         <div class="hint">Controlled by your login — can't be changed here.</div>
       </div>
-      <div class="field"><label>Phone Number</label><input id="pfPhone" type="tel" value="${esc(p.phone||'')}" placeholder="10-digit mobile number"></div>
-      <div class="field"><label>Class</label><input id="pfClass" type="text" value="${esc(p.class||'')}"></div>
+      <div class="field"><label>Phone Number</label><input id="pfPhone" type="tel" value="${esc(p.phone||'')}" placeholder="10-digit mobile number" disabled></div>
+      <div class="field"><label>Class</label><input id="pfClass" type="text" value="${esc(p.class||'')}" disabled></div>
       <div class="field">
         <label>🔒 Batch</label>
         <input type="text" value="${esc(p.batch||'—')}" disabled style="opacity:.6;cursor:not-allowed">
         <div class="hint">Set by your teacher via batch enrollment — can't be changed here.</div>
       </div>
-      <div class="field"><label>School</label><input id="pfSchool" type="text" value="${esc(p.school||'')}"></div>
+      <div class="field"><label>School</label><input id="pfSchool" type="text" value="${esc(p.school||'')}" disabled></div>
       <div class="row2">
-        <div class="field"><label>Parent/Guardian Name</label><input id="pfGName" type="text" value="${esc(p.guardianName||'')}"></div>
-        <div class="field"><label>Parent/Guardian Phone</label><input id="pfGPhone" type="tel" value="${esc(p.guardianPhone||'')}"></div>
+        <div class="field"><label>Parent/Guardian Name</label><input id="pfGName" type="text" value="${esc(p.guardianName||'')}" disabled></div>
+        <div class="field"><label>Parent/Guardian Phone</label><input id="pfGPhone" type="tel" value="${esc(p.guardianPhone||'')}" disabled></div>
       </div>
-      <div class="field"><label>Date of Birth</label><input id="pfDob" type="date" value="${esc(p.dob||'')}"></div>
-      <div class="field"><label>Address</label><textarea id="pfAddress" placeholder="House/street, area">${esc(p.address||'')}</textarea></div>
+      <div class="field"><label>Date of Birth</label><input id="pfDob" type="date" value="${esc(p.dob||'')}" disabled></div>
+      <div class="field"><label>Address</label><textarea id="pfAddress" placeholder="House/street, area" disabled>${esc(p.address||'')}</textarea></div>
       <div id="pfErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:10px"></div>
-      <button class="btn btn-primary" id="pfSaveBtn">💾 Save Changes</button>
+      <button class="btn btn-primary" id="pfSaveBtn">✏️ Edit</button>
     </div>
   `));
+  // Fields open only after an explicit Edit tap — the button then becomes Save Changes for that
+  // same tap-to-save action. Prevents an accidental change while just browsing the profile screen.
+  const pfEditableIds = ['pfFullName','pfPhone','pfClass','pfSchool','pfGName','pfGPhone','pfDob','pfAddress'];
+  let pfEditing = false;
   $('#pfSaveBtn', container).addEventListener('click', async ()=>{
+    const btn = $('#pfSaveBtn', container);
+    if(!pfEditing){
+      pfEditing = true;
+      pfEditableIds.forEach(id => { const f = $('#'+id, container); if(f) f.disabled = false; });
+      btn.textContent = '💾 Save Changes';
+      const first = $('#pfFullName', container); if(first) first.focus();
+      return;
+    }
     const errBox = $('#pfErr', container);
     errBox.style.display = 'none';
     const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
@@ -3610,7 +3622,7 @@ function renderProfileTab(container){
       address: $('#pfAddress', container).value.trim(),
       school: $('#pfSchool', container).value.trim(),
     };
-    const btn = $('#pfSaveBtn', container); btn.disabled = true; btn.textContent = 'Saving…';
+    btn.disabled = true; btn.textContent = 'Saving…';
     try{
       await db.collection(COL.students).doc(CURRENT_USER.uid).update(updates);
       Object.assign(CURRENT_PROFILE, updates);
@@ -4635,19 +4647,19 @@ function openStudentDetail(s){
     <div class="sheet-handle"></div><button class="sheet-close" id="closeDetail" aria-label="Close">${icon('close')}</button><div style="clear:both"></div>
     <div class="card">
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">${esc(s.email||'')}</div>
-      <div class="field"><label>Full Name</label><input id="sdFullName" type="text" value="${esc(s.fullName||'')}" placeholder="e.g. Virat Kohli"></div>
-      <div class="field"><label>Phone Number</label><input id="sdPhone" type="tel" value="${esc(s.phone||'')}" placeholder="10-digit mobile number"></div>
-      <div class="field"><label>Class</label><input id="sdClass" type="text" value="${esc(s.class||'')}"></div>
-      <div class="field"><label>School</label><input id="sdSchool" type="text" value="${esc(s.school||'')}"></div>
+      <div class="field"><label>Full Name</label><input id="sdFullName" type="text" value="${esc(s.fullName||'')}" placeholder="e.g. Virat Kohli" disabled></div>
+      <div class="field"><label>Phone Number</label><input id="sdPhone" type="tel" value="${esc(s.phone||'')}" placeholder="10-digit mobile number" disabled></div>
+      <div class="field"><label>Class</label><input id="sdClass" type="text" value="${esc(s.class||'')}" disabled></div>
+      <div class="field"><label>School</label><input id="sdSchool" type="text" value="${esc(s.school||'')}" disabled></div>
       <div class="row2">
-        <div class="field"><label>Parent/Guardian Name</label><input id="sdGName" type="text" value="${esc(s.guardianName||'')}"></div>
-        <div class="field"><label>Parent/Guardian Phone</label><input id="sdGPhone" type="tel" value="${esc(s.guardianPhone||'')}"></div>
+        <div class="field"><label>Parent/Guardian Name</label><input id="sdGName" type="text" value="${esc(s.guardianName||'')}" disabled></div>
+        <div class="field"><label>Parent/Guardian Phone</label><input id="sdGPhone" type="tel" value="${esc(s.guardianPhone||'')}" disabled></div>
       </div>
-      <div class="field"><label>Date of Birth</label><input id="sdDob" type="date" value="${esc(s.dob||'')}"></div>
-      <div class="field"><label>Address</label><textarea id="sdAddress" placeholder="House/street, area">${esc(s.address||'')}</textarea></div>
+      <div class="field"><label>Date of Birth</label><input id="sdDob" type="date" value="${esc(s.dob||'')}" disabled></div>
+      <div class="field"><label>Address</label><textarea id="sdAddress" placeholder="House/street, area" disabled>${esc(s.address||'')}</textarea></div>
       <div style="font-size:12px;color:var(--text-muted);margin:2px 0 10px">Watch time: <b style="color:var(--text)">${Math.round(s.watchMinutes||0)} mins</b></div>
       <div id="sdErr" style="display:none;color:var(--danger);font-size:12px;margin-bottom:8px"></div>
-      <button class="btn btn-primary" id="sdSaveBtn" style="width:100%">💾 Save Changes</button>
+      <button class="btn btn-primary" id="sdSaveBtn" style="width:100%">✏️ Edit</button>
       <div class="row2" style="margin-top:12px">
         <button class="btn ${s.active===false?'btn-success':'btn-danger'}" id="toggleActive">${icon(s.active===false?'check':'ban',16)}<span>${s.active===false?'Activate':'Deactivate'}</span></button>
         <button class="btn btn-ghost" id="resetDevice">${icon('refresh',16)}<span>Reset device</span></button>
@@ -4678,7 +4690,20 @@ function openStudentDetail(s){
   document.body.appendChild(overlay);
   let enrollUnsub = null;
   $('#closeDetail', overlay).addEventListener('click', ()=>{ if(enrollUnsub) enrollUnsub(); overlay.remove(); });
+  // Fields open only after an explicit Edit tap (same pattern as the student's own profile screen) —
+  // the button then becomes Save Changes for that same tap-to-save action, and reverts to disabled +
+  // Edit once the save succeeds, since this sheet stays open rather than re-rendering.
+  const sdEditableIds = ['sdFullName','sdPhone','sdClass','sdSchool','sdGName','sdGPhone','sdDob','sdAddress'];
+  let sdEditing = false;
   $('#sdSaveBtn', overlay).addEventListener('click', async ()=>{
+    const btn = $('#sdSaveBtn', overlay);
+    if(!sdEditing){
+      sdEditing = true;
+      sdEditableIds.forEach(id => { const f = $('#'+id, overlay); if(f) f.disabled = false; });
+      btn.textContent = '💾 Save Changes';
+      const first = $('#sdFullName', overlay); if(first) first.focus();
+      return;
+    }
     const errBox = $('#sdErr', overlay);
     errBox.style.display = 'none';
     const showErr = msg => { errBox.textContent = msg; errBox.style.display = ''; };
@@ -4698,12 +4723,14 @@ function openStudentDetail(s){
       dob: $('#sdDob', overlay).value,
       address: $('#sdAddress', overlay).value.trim(),
     };
-    const btn = $('#sdSaveBtn', overlay); btn.disabled = true; btn.textContent = 'Saving…';
+    btn.disabled = true; btn.textContent = 'Saving…';
     try{
       await db.collection(COL.students).doc(s.id).update(updates);
       Object.assign(s, updates);
       toast('Student details updated');
-      btn.disabled = false; btn.textContent = '💾 Save Changes';
+      sdEditing = false;
+      sdEditableIds.forEach(id => { const f = $('#'+id, overlay); if(f) f.disabled = true; });
+      btn.disabled = false; btn.textContent = '✏️ Edit';
     }catch(err){
       console.error(err);
       btn.disabled = false; btn.textContent = '💾 Save Changes';
