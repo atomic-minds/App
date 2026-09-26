@@ -2763,6 +2763,22 @@ function tmsAttemptExpired(attempt, test){
   return Date.now() > startedMs + def.durationMin*60000;
 }
 
+// Silently launching an expired attempt (tmsPaintResumeCard, below) only OPENS the player and lets
+// its own tick() do the real submit — it doesn't wait for that submit to land. The submit needs a
+// moment (the freshly-opened player has to boot and post back), so checking Firestore again right
+// after the launch call returns can still see the attempt as "in-progress" and repaint the same
+// card. Poll a few times with a real pause between checks — instead of once, immediately — so the
+// Dashboard only clears the card once the attempt is genuinely confirmed gone.
+async function tmsConfirmFinished(attemptId, testId){
+  for(let i=0; i<6; i++){
+    await new Promise(r => setTimeout(r, 1500));
+    try{
+      const list = await fetchMyAttempts(testId);
+      if(!list.some(a => a.id === attemptId && a.status === 'in-progress')) return;
+    }catch(e){}
+  }
+}
+
 // Dashboard card for an unfinished attempt. Reopening the app after closing it lands on the
 // Dashboard as normal; a still-timed attempt gets its usual Resume button. One whose timer already
 // ran out while the app was closed gets NO resume option at all — Firebase Spark has no server-side
@@ -2782,10 +2798,13 @@ function tmsPaintResumeCard(slot){
         </div>`));
         // Same resume mechanism as a normal Resume tap; the player's own timer sees the deadline has
         // passed and submits immediately (showing "Time is up — submitting your test…") instead of
-        // ever showing the question screen. A failure (e.g. genuinely offline) stays silent — the
-        // repaint below just leaves the "finishing automatically…" card up until the next Dashboard
-        // load (app reopen, or navigating back to it) tries again.
+        // ever showing the question screen. tmsConfirmFinished waits for that real submit to land
+        // before we re-check — checking right away would just catch it still mid-flight and repaint
+        // the same card. A failure (e.g. genuinely offline) stays silent — the repaint below just
+        // leaves the "finishing automatically…" card up until the next Dashboard load (app reopen,
+        // or navigating back to it) tries again.
         tmsResumeAttemptById(attempt.id, attempt.testId, { autoResumed:true, silentError:true })
+          .then(launched => launched ? tmsConfirmFinished(attempt.id, attempt.testId) : null)
           .then(() => { if(slot.isConnected) tmsLoadUnfinished(true).then(paint); });
         return;
       }
