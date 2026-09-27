@@ -335,6 +335,14 @@ mjx-container{color:var(--text) !important}
 @media(min-width:481px){
   .content-area,.bottom-nav{max-width:480px}
 }
+
+/* Defensive only: printing is triggered from inside the test player's own iframe (its own
+   @media print rules do the real work), which normally means this outer page is never part of
+   what gets printed at all. This just hides the persistent app chrome in the rare case a browser
+   prints the parent frame instead. */
+@media print{
+  .top-header,.bottom-nav,.admin-header,.drawer,.tms-frame-bar{display:none !important}
+}
 </style>
 </head>
 <body>
@@ -2374,6 +2382,15 @@ function tmsCleanSeen(arr, n, answers){
   for(let i=0;i<n;i++) out[i] = !!(Array.isArray(arr) && arr[i]) || answers[i] != null;
   return out;
 }
+/* Per-question active time (seconds), local-only until final submission. Same shape/defaulting
+   pattern as tmsCleanAnswers/tmsCleanSeen above: an older attempt or a corrupt/missing local
+   record just comes back as all-zero, which the Review screen shows as a graceful 00:00 —
+   never fabricated or estimated. */
+function tmsCleanTimeSpent(arr, n){
+  const out = new Array(n).fill(0);
+  if(Array.isArray(arr)) for(let i=0;i<n;i++){ const v = Number(arr[i]); if(Number.isFinite(v) && v>=0) out[i] = Math.round(v); }
+  return out;
+}
 
 /* -------- test definition (questions + scoring + timing) --------
    Reads structured fields when they exist (questions, marksPerQuestion,
@@ -2895,7 +2912,7 @@ function launchTestPlayer(t, def, opts){
   let attempt = opts.attempt || null;   // existing in-progress attempt (resume) or the one created on Start
   let rt = null;                        // { startedMs, offset, violations } — timer basis + local violation counter
   let finished = false, submitting = false, starting = false, finishedView = null;
-  let lastState = { cur:0, answers:new Array(n).fill(null), seen:new Array(n).fill(false) };
+  let lastState = { cur:0, answers:new Array(n).fill(null), seen:new Array(n).fill(false), timeSpent:new Array(n).fill(0) };
   let leftAt = 0;                       // set when the page goes hidden; the violation is counted when it comes back
   let autoModalPending = false;         // show "TEST AUTO-SUBMITTED" once the auto-submit has really completed
   let fsWasIn = false, fsPending = false;
@@ -2929,9 +2946,13 @@ function launchTestPlayer(t, def, opts){
     const answers = tmsCleanAnswers(ok ? local.answers : null, n);
     lastState = {
       cur: ok && Number.isInteger(local.cur) ? Math.min(Math.max(local.cur,0), n-1) : 0,
-      answers, seen: tmsCleanSeen(ok ? local.seen : null, n, answers)
+      answers, seen: tmsCleanSeen(ok ? local.seen : null, n, answers),
+      // timeSpent doesn't gate `ok` above — an attempt saved before this feature existed still
+      // restores its answers/position normally and simply starts every question's time at 0.
+      timeSpent: tmsCleanTimeSpent(ok ? local.timeSpent : null, n)
     };
     boot.resume = { answers, seen: lastState.seen, cur: lastState.cur, deadlineMs: deadlineFor(), restored: ok,
+                    timeSpent: lastState.timeSpent,
                     // violations already reached the limit before the page was reloaded/killed -> finish it now
                     autoSubmit: rt.violations >= MAX_TEST_SCREEN_VIOLATIONS ? 'violations' : '' };
   }
@@ -2947,12 +2968,13 @@ function launchTestPlayer(t, def, opts){
     tmsLsSet(tmsAttemptKey(attempt.id), {
       attemptId: attempt.id, studentId: uid, testId: t.id, attemptNumber: attempt.attemptNumber,
       startedAtMs: rt.startedMs, clockOffsetMs: rt.offset, violations: rt.violations,
-      cur: lastState.cur, answers: lastState.answers, seen: lastState.seen, savedAt: Date.now()
+      cur: lastState.cur, answers: lastState.answers, seen: lastState.seen, timeSpent: lastState.timeSpent, savedAt: Date.now()
     });
   }
   function saveLocal(m){
     const answers = tmsCleanAnswers(m.answers, n);
-    lastState = { cur: Number.isInteger(m.cur) ? m.cur : 0, answers, seen: tmsCleanSeen(m.seen, n, answers) };
+    lastState = { cur: Number.isInteger(m.cur) ? m.cur : 0, answers, seen: tmsCleanSeen(m.seen, n, answers),
+                  timeSpent: tmsCleanTimeSpent(m.timeSpent, n) };
     writeLocal();
   }
 
@@ -3097,7 +3119,10 @@ function launchTestPlayer(t, def, opts){
     try{
       const answers = tmsCleanAnswers(m.answers, n);
       const seen = tmsCleanSeen(m.seen, n, answers);
-      const answerDocs = answers.map((a,i)=> ({ questionIndex:i, selectedAnswer:a, seen: !!seen[i] }));
+      const timeSpent = tmsCleanTimeSpent(m.timeSpent, n);
+      // Per-question timing rides in the SAME answer entries the existing submission already
+      // writes (one extra field each) — no separate document, no separate Firestore write.
+      const answerDocs = answers.map((a,i)=> ({ questionIndex:i, selectedAnswer:a, seen: !!seen[i], timeSpentSeconds: timeSpent[i] }));
       const result = computeTestResult(def, answers);
       let view;
       if(isPractice){
@@ -3300,7 +3325,6 @@ function openTestHub(t, ctx){
    STUDENT — Tests tab
    ================================================================ */
 function renderTestsTab(container){
-  container.appendChild(el(`<div class="card-title">📝 Tests</div>`));
   container.appendChild(el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="stSearch" placeholder="Search tests..."></div>`));
   const subjectRow = el(`<div class="tab-filter" id="stSubjectRow"></div>`);
   container.appendChild(subjectRow);
@@ -3896,6 +3920,7 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
 .sol.notseen{border-left:3px solid #6b7280}
 .st{font-size:12px;font-weight:700;margin:6px 0}
 .st.correct{color:#4ade80}.st.wrong,.st.unans{color:#f87171}.st.notseen{color:#8b949e}
+.q-time{font-size:11px;color:#8b949e;margin:0 0 8px}
 .ropt{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid #30363d;border-radius:8px;margin-top:6px}
 .ropt.correct{border-color:#22c55e;background:rgba(34,197,94,.12)}
 .ropt.wrongpick{border-color:#ef4444;background:rgba(239,68,68,.12)}
@@ -3918,6 +3943,46 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
 .mCancel{background:#21262d;color:#e6edf3}
 .mSubmit{background:#ef4444;color:#fff}
 .flash{position:fixed;left:12px;right:12px;bottom:14px;background:#21262d;color:#e6edf3;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.5;z-index:60;box-shadow:0 4px 18px rgba(0,0,0,.5)}
+.pdf-actions{margin:18px 0 6px;text-align:center}
+.pdfBtn{padding:12px 22px;background:#1c2333;color:#e6edf3;border:1px solid #30363d;border-radius:10px;font-weight:700;font-size:14px;cursor:pointer}
+.pdfBtn:active{background:#232a3d}
+.pdf-hint{font-size:11px;color:#6b7280;margin-top:6px}
+
+/* ---------------- print (Save as PDF) ----------------
+   Printing is triggered from INSIDE this iframe (window.print() called on the iframe's own
+   window prints just this document), so the parent app's chrome — top bar, bottom nav, the
+   Close button above this frame — is never part of what gets printed; nothing there needs
+   hiding. Everything below only reflows THIS document for paper: dark theme -> readable
+   light theme, non-printable controls hidden, review cards kept from splitting across pages. */
+@media print{
+  html,body{background:#fff !important;color:#111 !important}
+  #introScreen,#testScreen,#confirmModal,#busyModal,.flash,.no-print,.legend,#rvPalette{display:none !important}
+  #reviewScreen{display:block !important;padding:0 !important}
+  .banner{display:none !important}
+  .result{background:#fff;border:1px solid #999;color:#111;padding:10px 0;page-break-inside:avoid;break-inside:avoid}
+  .rmeta{color:#333}
+  .score{color:#111}
+  .chip{border:1px solid #999 !important;background:#fff !important;color:#111 !important}
+  .sol{background:#fff;border:1px solid #ccc;color:#111;page-break-inside:avoid;break-inside:avoid;margin-top:14px}
+  .sol.correct{border-left:4px solid #16a34a}
+  .sol.wrong,.sol.unans{border-left:4px solid #dc2626}
+  .sol.notseen{border-left:4px solid #666}
+  .q-num,.q-time{color:#555}
+  .q-text{color:#111}
+  .st.correct{color:#15803d}
+  .st.wrong,.st.unans{color:#b91c1c}
+  .st.notseen{color:#555}
+  .ropt{border:1px solid #ccc;background:#fff;color:#111}
+  .ropt.correct{border-color:#16a34a;background:#f0fdf4}
+  .ropt.wrongpick{border-color:#dc2626;background:#fef2f2}
+  .tag{border:1px solid currentColor;background:#fff !important}
+  .tag.ok{color:#15803d}
+  .tag.no{color:#b91c1c}
+  .explain-box{border-top:1px dashed #999;color:#333}
+  .q-image img,.rq-image img,.explain-box img{max-width:100% !important;page-break-inside:avoid}
+  .explain-link{color:#111;text-decoration:underline}
+  @page{margin:14mm}
+}
 `;
 
 const TMS_PLAYER_BODY = `
@@ -3972,6 +4037,45 @@ function tmsPlayerMain(){
   for(var z=0; z<N; z++){ answers.push(null); seen.push(false); }
   var started = false, submitting = false, done = false, lastAuto = false, lastReason = '', deadline = 0, timerHandle = null, lastGesture = 0;
 
+  /* ---------------- per-question active time (local only until final submission) ----------------
+     qTime[i] = accumulated whole seconds spent actively viewing question i. timeCur/timeStartedAt
+     track the CURRENTLY running segment; renderQ() below is the single choke point for every kind
+     of navigation (palette tap, Prev/Next, or a resumed position), so switching questions there —
+     and ONLY there — is what starts/stops a segment. A same-question re-render (e.g. after picking
+     an answer) leaves timeCur === cur and is a no-op, so nothing is double-counted. Visibility
+     pause/resume stops and restarts the clock without touching qTime for any other question. */
+  var qTime = []; for(var zt=0; zt<N; zt++) qTime.push(0);
+  var timeCur = -1, timeStartedAt = 0, qtHandle = null;
+  function timeFlush(){
+    if(timeCur >= 0 && timeStartedAt){
+      var delta = Math.round((Date.now() - timeStartedAt)/1000);
+      if(delta > 0) qTime[timeCur] += delta;
+    }
+    timeStartedAt = 0;
+  }
+  function timeSwitch(i){
+    if(i === timeCur) return;          // same question re-rendering — never double-count
+    timeFlush();
+    timeCur = i;
+    if(!document.hidden) timeStartedAt = Date.now();
+  }
+  function timePause(){ timeFlush(); }
+  function timeResume(){ if(timeCur >= 0 && started && !done) timeStartedAt = Date.now(); }
+  // Periodic checkpoint (attempt mode only): flushes the running segment into qTime and restarts
+  // it immediately, then piggybacks on the existing local-persistence message — so a refresh or a
+  // closed tab never loses more than one checkpoint interval's worth of the CURRENT question's time.
+  // This is still zero Firestore reads/writes: saveState() only ever posts to the parent, which
+  // only ever writes to localStorage (Firestore is touched solely by the existing Start/Submit calls).
+  function timeCheckpoint(){
+    if(!started || done) return;
+    if(timeCur >= 0 && timeStartedAt){
+      var delta = Math.round((Date.now() - timeStartedAt)/1000);
+      if(delta > 0) qTime[timeCur] += delta;
+      timeStartedAt = document.hidden ? 0 : Date.now();
+    }
+    saveState();
+  }
+
   function $(id){ return document.getElementById(id); }
   function h(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function num(x){ return String(Math.round((Number(x)||0)*100)/100); }
@@ -3984,6 +4088,27 @@ function tmsPlayerMain(){
   function fmtDate(ms){
     if(!ms) return '';
     try{ return new Date(ms).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return ''; }
+  }
+  // MM:SS, or H:MM:SS once an hour is reached. Whole seconds only — matches how qTime is accumulated.
+  function fmtDur(sec){
+    sec = Math.max(0, Math.round(Number(sec)||0));
+    var hh = Math.floor(sec/3600), mm = Math.floor((sec%3600)/60), ss = sec%60;
+    var mmss = String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0');
+    return hh>0 ? (hh+':'+mmss) : mmss;
+  }
+  // Native print only (no library, no server round-trip) — the button just opens the browser/OS
+  // print dialog; whether "Save as PDF" is offered there is entirely up to the device, so this
+  // never claims a PDF was produced, only that printing was attempted.
+  function doPrint(){
+    try{
+      if(typeof window.print !== 'function'){
+        flash('Printing isn\u2019t supported in this browser. Open this review in a supported browser and use its Print / Save as PDF option.');
+        return;
+      }
+      window.print();
+    }catch(e){
+      flash('Couldn\u2019t open the print dialog. Open this review in a supported browser and use its Print / Save as PDF option.');
+    }
   }
 
   // Broken images: hide + show the inline error text (no inline handlers needed)
@@ -4023,9 +4148,10 @@ function tmsPlayerMain(){
 
   /* ---------------- test ---------------- */
   function saveState(){
-    if(mode === 'attempt') post({ type:'state', cur:cur, answers:answers, seen:seen });
+    if(mode === 'attempt') post({ type:'state', cur:cur, answers:answers, seen:seen, timeSpent:qTime });
   }
   function renderQ(){
+    timeSwitch(cur);
     var q = QUESTIONS[cur];
     seen[cur] = true;
     var parts = '<div class="q-card"><div class="q-num">Question '+(cur+1)+' of '+N+'</div>';
@@ -4096,11 +4222,16 @@ function tmsPlayerMain(){
       for(var i=0;i<N;i++){ answers[i] = (o.answers[i]==null ? null : o.answers[i]); seen[i] = !!(o.seen && o.seen[i]) || answers[i]!=null; }
       cur = Math.min(Math.max(o.cur||0,0), N-1);
     }
+    if(o.timeSpent){ for(var it=0; it<N; it++){ var v = Number(o.timeSpent[it]); qTime[it] = (isFinite(v) && v>0) ? Math.round(v) : 0; } }
     deadline = o.deadlineMs || 0;
     $('introScreen').style.display = 'none';
     $('testScreen').style.display = 'block';
     renderQ();
     startTicker();
+    // Attempt mode only (Practice has no cross-refresh resume to protect): a light periodic
+    // checkpoint so a refresh or a closed tab can never lose more than ~20s of the CURRENT
+    // question's time. It only ever posts to the parent -> localStorage — never Firestore.
+    if(mode === 'attempt'){ if(qtHandle) clearInterval(qtHandle); qtHandle = setInterval(timeCheckpoint, 20000); }
     if(o.autoSubmit) doSubmit(true, o.autoSubmit);   // e.g. the violation limit was already reached before a reload
   }
 
@@ -4127,10 +4258,11 @@ function tmsPlayerMain(){
     if(submitting || done) return;          // double-submit guard
     submitting = true; lastAuto = !!auto; lastReason = reason || '';
     if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
+    timeFlush();                             // capture the segment for whichever question is on screen right now
     $('confirmModal').classList.remove('open');
     $('mSubmitBtn').disabled = true;
     showBusy(reason === 'violations' ? 'Auto-submitting your test\u2026' : auto ? 'Time is up \u2014 submitting your test\u2026' : 'Submitting your test\u2026');
-    post({ type:'submit', answers:answers, seen:seen, auto:!!auto });
+    post({ type:'submit', answers:answers, seen:seen, auto:!!auto, timeSpent:qTime });
   }
   function submitFailed(msg){
     submitting = false;
@@ -4144,10 +4276,14 @@ function tmsPlayerMain(){
   function renderReview(v, fresh){
     $('introScreen').style.display = 'none'; $('testScreen').style.display = 'none';
     if(timerHandle){ clearInterval(timerHandle); timerHandle = null; }
+    if(qtHandle){ clearInterval(qtHandle); qtHandle = null; }
     var byIdx = {};
     (v.answers||[]).forEach(function(a){ if(a && typeof a.questionIndex === 'number') byIdx[a.questionIndex] = a; });
     function sel(i){ var a = byIdx[i]; return (a && a.selectedAnswer != null) ? a.selectedAnswer : null; }
     function wasSeen(i){ var a = byIdx[i]; return !!(a && (a.seen || a.selectedAnswer != null)); }
+    // Older attempts saved before per-question timing existed simply have no timeSpentSeconds field —
+    // shown as 00:00, never guessed or backfilled.
+    function timeOf(i){ var a = byIdx[i]; var s = a && Number(a.timeSpentSeconds); return (isFinite(s) && s>0) ? Math.round(s) : 0; }
     function stateOf(i){
       var s = sel(i);
       if(s == null) return wasSeen(i) ? 'unans' : 'notseen';
@@ -4183,6 +4319,7 @@ function tmsPlayerMain(){
       if(q.text) b += '<div class="q-text">'+q.text+'</div>';
       if(q.imageUrl) b += '<div class="rq-image"><img src="'+h(q.imageUrl)+'" alt=""><div class="imgerr" style="display:none;font-size:12px;color:#ef4444">Image failed to load</div></div>';
       b += '<div class="st '+st+'">'+stText+'</div>';
+      b += '<div class="q-time">Time Spent: '+fmtDur(timeOf(i))+'</div>';
       for(var k=0;k<4;k++){
         var ot = (q.options && q.options[k]) ? q.options[k] : '';
         var oc = 'ropt' + (k===q.correct ? ' correct' : '') + ((s===k && k!==q.correct) ? ' wrongpick' : '');
@@ -4201,6 +4338,8 @@ function tmsPlayerMain(){
       }
       out += b + '</div>';
     });
+    out += '<div class="pdf-actions no-print"><button type="button" class="pdfBtn" id="pdfBtn">\uD83D\uDDA8\uFE0F Save as PDF</button>' +
+           '<div class="pdf-hint">Opens your browser/device\u2019s Print dialog — choose "Save as PDF" there.</div></div>';
     var rs = $('reviewScreen');
     rs.innerHTML = out; rs.style.display = 'block';
     window.scrollTo(0,0);
@@ -4211,6 +4350,7 @@ function tmsPlayerMain(){
   $('quizArea').addEventListener('click', function(e){ var o = e.target.closest('.opt'); if(o) selectOpt(parseInt(o.getAttribute('data-i'),10)); });
   $('palette').addEventListener('click', function(e){ var b = e.target.closest('.pb'); if(b) jump(parseInt(b.getAttribute('data-i'),10)); });
   $('reviewScreen').addEventListener('click', function(e){
+    var p = e.target.closest('#pdfBtn'); if(p){ doPrint(); return; }
     var b = e.target.closest('.pb'); if(!b) return;
     var t = document.getElementById('rq'+b.getAttribute('data-i')); if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
   });
@@ -4233,6 +4373,12 @@ function tmsPlayerMain(){
     var t = Date.now(); if(t - lastGesture < 1500) return;
     lastGesture = t; post({ type:'gesture' });
   }, true);
+  // Per-question timing only: pause the clock while this document is hidden/backgrounded and
+  // resume it when it's visible again. Independent of the parent frame's own violation-counting
+  // visibility handling (untouched) — this never affects the overall test timer/deadline.
+  document.addEventListener('visibilitychange', function(){
+    if(document.hidden) timePause(); else timeResume();
+  });
   window.addEventListener('message', function(e){
     if(e.source !== window.parent) return;
     var m = e.data; if(!m || m.tms !== 1) return;
@@ -5055,7 +5201,12 @@ function drawRecordedForm(body){
         </div></div>
         <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
       </div>`);
-      $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.videos).doc(v.id).delete(); toast('Deleted'); });
+      $('button',card).addEventListener('click', async (ev)=>{
+        if(!await confirmDelete()) return;
+        const btn = ev.currentTarget; btn.disabled = true;
+        try{ await db.collection(COL.videos).doc(v.id).delete(); toast('Deleted'); }
+        catch(e){ console.error(e); toast('Could not delete — check your connection.'); btn.disabled = false; }
+      });
       listBox.appendChild(card);
     });
   });
@@ -5117,8 +5268,14 @@ function drawLiveForm(body){
         </div>
       </div>`);
       $all('button',card).forEach(b=> b.addEventListener('click', async ()=>{
-        if(b.dataset.act==='del'){ await db.collection(COL.liveClasses).doc(lc.id).delete(); toast('Deleted'); }
-        else { await db.collection(COL.liveClasses).doc(lc.id).update({status:b.dataset.act}); toast('Updated'); }
+        if(b.dataset.act==='del'){
+          if(!await confirmDelete()) return;
+          b.disabled = true;
+          try{ await db.collection(COL.liveClasses).doc(lc.id).delete(); toast('Deleted'); }
+          catch(e){ console.error(e); toast('Could not delete — check your connection.'); b.disabled = false; }
+        } else {
+          await db.collection(COL.liveClasses).doc(lc.id).update({status:b.dataset.act}); toast('Updated');
+        }
       }));
       listBox.appendChild(card);
     });
@@ -5341,7 +5498,12 @@ function renderPublishedTestsSection(container, getTests, opts){
         </div>
       </div>`);
       $all('button',card).forEach(b=>b.addEventListener('click', async ()=>{
-        if(b.dataset.act==='del'){ await db.collection(COL.tests).doc(t.id).delete(); toast('Deleted'); }
+        if(b.dataset.act==='del'){
+          if(!await confirmDelete()) return;
+          b.disabled = true;
+          try{ await db.collection(COL.tests).doc(t.id).delete(); toast('Deleted'); }
+          catch(e){ console.error(e); toast('Could not delete — check your connection.'); b.disabled = false; }
+        }
         else if(b.dataset.act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
         else if(b.dataset.act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
         else { openTestResults(t); }
@@ -5486,6 +5648,18 @@ function adminConfirmSheet(o){
     const done = v => { ov.remove(); resolve(v); };
     $('[data-no]', ov).addEventListener('click', () => done(false));
     $('[data-yes]', ov).addEventListener('click', () => done(true));
+  });
+}
+
+/* Generic "delete this item" confirmation — the standard dialog every plain Delete button
+   (Classes/Recorded, Classes/Live Class, Tests/Published Tests, Notes) shows before deleting.
+   Built on the exact same adminConfirmSheet component/styling Delete History already uses,
+   so nothing new was introduced — just reused with the requested wording. */
+function confirmDelete(){
+  return adminConfirmSheet({
+    title: 'Are you sure you want to delete?',
+    lines: ['This action cannot be undone. The selected item will be permanently deleted.'],
+    cancel: 'Cancel', confirm: 'Delete'
   });
 }
 
@@ -6307,7 +6481,12 @@ function renderAdminNotes(container){
         </div></div>
         <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
       </div>`);
-      $('button',card).addEventListener('click', async ()=>{ await db.collection(COL.notes).doc(n.id).delete(); toast('Deleted'); });
+      $('button',card).addEventListener('click', async (ev)=>{
+        if(!await confirmDelete()) return;
+        const btn = ev.currentTarget; btn.disabled = true;
+        try{ await db.collection(COL.notes).doc(n.id).delete(); toast('Deleted'); }
+        catch(e){ console.error(e); toast('Could not delete — check your connection.'); btn.disabled = false; }
+      });
       listBox.appendChild(card);
     });
   });
