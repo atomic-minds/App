@@ -98,6 +98,13 @@ img{max-width:100%}
 .field .hint{font-size:12px;color:var(--text-dim);margin-top:4px}
 .row2{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 
+/* -------- standalone filter selects (Tests library filters, outside .field) -------- */
+select{width:100%;padding:9px 10px;border-radius:var(--radius);background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text);outline:none}
+select:focus{border-color:var(--accent)}
+.filter-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.count{font-size:12px;color:var(--text-dim)}
+
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;width:100%;
   padding:11px;border-radius:var(--radius);border:1px solid transparent;font-size:15px;font-weight:600;}
 .btn-sm{width:auto;display:inline-flex;align-items:center;justify-content:center;gap:7px;
@@ -2310,6 +2317,44 @@ const TEST_KIND_META = {
   practice: { icon:'📚', label:'Practice' }
 };
 
+/* ---------- Tests library — shared filter helpers (Admin Published Tests / Results
+   + Student Tests subject filter). Subjects are free-text per test document, so options
+   are derived dynamically from whatever tests are already loaded (never a fresh query) and
+   normalized case-insensitively so "chemistry" and "Chemistry" collapse into one filter. ---------- */
+function normalizeSubjectKey(s){ return (s||'').trim().toLowerCase(); }
+function uniqueSubjects(tests){
+  const map = new Map(); // key -> first-seen display label
+  (tests||[]).forEach(t=>{
+    const raw = (t.subject||'').trim();
+    if(!raw) return;
+    const key = normalizeSubjectKey(raw);
+    if(!map.has(key)) map.set(key, raw);
+  });
+  return Array.from(map.entries()).map(([key,label])=>({key,label})).sort((a,b)=> a.label.localeCompare(b.label));
+}
+/* Admin-only: batch filter options built from the tests actually published — reuses the
+   existing batchId/batchName already stored on each test doc, no second batch system. */
+function uniqueBatchesFromTests(tests){
+  const map = new Map();
+  (tests||[]).forEach(t=>{
+    if(!t.batchId) return;
+    const name = t.batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : (t.batchName || t.batch || t.batchId);
+    if(!map.has(t.batchId)) map.set(t.batchId, name);
+  });
+  return Array.from(map.entries()).map(([id,name])=>({id,name})).sort((a,b)=> a.name.localeCompare(b.name));
+}
+/* Client-side-only status badge for a Live test, derived from liveStartAt/liveEndAt —
+   no new scheduling system, no periodic Firestore writes, just a read of already-loaded fields. */
+function liveStatusBadge(t){
+  if(testKind(t) !== 'live') return '';
+  const s = tsToMs(t.liveStartAt), e = tsToMs(t.liveEndAt);
+  if(s == null || e == null) return '<span class="badge badge-muted">No schedule set</span>';
+  const now = Date.now();
+  if(now < s) return '<span class="badge badge-accent">🗓 Scheduled</span>';
+  if(now <= e) return '<span class="badge badge-live">🔴 Live Now</span>';
+  return '<span class="badge badge-muted">Ended</span>';
+}
+
 function tmsErr(code, message, extra){ const e = new Error(message); e.tmsCode = code; e.extra = extra; return e; }
 
 /* -------- localStorage helpers (never throw) -------- */
@@ -3255,6 +3300,10 @@ function openTestHub(t, ctx){
    STUDENT — Tests tab
    ================================================================ */
 function renderTestsTab(container){
+  container.appendChild(el(`<div class="card-title">📝 Tests</div>`));
+  container.appendChild(el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="stSearch" placeholder="Search tests..."></div>`));
+  const subjectRow = el(`<div class="tab-filter" id="stSubjectRow"></div>`);
+  container.appendChild(subjectRow);
   const filterRow = el(`<div class="tab-filter">
     <button data-f="all">All</button>
     <button data-f="live">🔴 Live</button>
@@ -3262,15 +3311,28 @@ function renderTestsTab(container){
     <button data-f="practice">📚 Practice</button>
   </div>`);
   container.appendChild(filterRow);
+  const countLbl = el(`<div class="count" style="margin:-4px 0 8px"></div>`);
+  container.appendChild(countLbl);
   const listBox = el(`<div><div class="spinner"></div></div>`);
   container.appendChild(listBox);
 
   let currentFilter = 'all';
+  let currentSubject = '';   // '' = All Subjects
+  let currentSearch = '';
   $all('button', filterRow).forEach(b=> b.classList.toggle('active', b.dataset.f===currentFilter));
   filterRow.addEventListener('click', e=>{
     const b=e.target.closest('button'); if(!b) return;
     currentFilter = b.dataset.f;
     $all('button',filterRow).forEach(x=>x.classList.toggle('active', x===b));
+    applyFilter();
+  });
+  $('#stSearch', container).addEventListener('input', ()=>{
+    currentSearch = $('#stSearch', container).value;
+    applyFilter();
+  });
+  subjectRow.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    currentSubject = b.dataset.subj;
     applyFilter();
   });
 
@@ -3310,15 +3372,50 @@ function renderTestsTab(container){
     trackUnsub(unsub);
   });
 
+  function clearFilters(){
+    currentFilter = 'all'; currentSubject = ''; currentSearch = '';
+    $('#stSearch', container).value = '';
+    $all('button', filterRow).forEach(x=> x.classList.toggle('active', x.dataset.f==='all'));
+    applyFilter();
+  }
+
+  function renderSubjectChips(){
+    // Subjects are derived only from `allTests` — the already-authorized, batch-filtered
+    // set delivered by listenContentByBatchIds() above — so this is a UI filter over data
+    // the student can already see, never a way to discover or reach unauthorized tests.
+    const subjects = uniqueSubjects(allTests);
+    subjectRow.innerHTML = `<button data-subj="" class="${currentSubject===''?'active':''}">All</button>` +
+      subjects.map(s=>`<button data-subj="${esc(s.key)}" class="${currentSubject===s.key?'active':''}">${esc(s.label)}</button>`).join('');
+  }
+
   function applyFilter(){
-    const filtered = currentFilter==='all' ? allTests : allTests.filter(t=>testKind(t)===currentFilter);
-    renderTestList(listBox, filtered, ctx);
+    let filtered = currentFilter==='all' ? allTests.slice() : allTests.filter(t=>testKind(t)===currentFilter);
+    if(currentSubject) filtered = filtered.filter(t=> normalizeSubjectKey(t.subject)===currentSubject);
+    const q = currentSearch.trim().toLowerCase();
+    if(q) filtered = filtered.filter(t=> (t.title||'').toLowerCase().includes(q));
+    renderSubjectChips();
+    countLbl.textContent = allTests.length ? (filtered.length + ' of ' + allTests.length + ' test' + (allTests.length===1?'':'s')) : '';
+    renderTestList(listBox, filtered, ctx, { totalCount: allTests.length, onClearFilters: clearFilters });
   }
 }
 
-function renderTestList(box, tests, ctx){
+function renderTestList(box, tests, ctx, opts){
+  opts = opts || {};
   box.innerHTML='';
-  if(!tests.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📝</div>No tests here yet.</div>`)); return; }
+  if(!tests.length){
+    if(!opts.totalCount){
+      box.appendChild(el(`<div class="empty-state"><div class="icon">📝</div>No tests here yet.</div>`));
+    } else {
+      const es = el(`<div class="empty-state"><div class="icon">🔍</div>No tests match your filters.</div>`);
+      if(opts.onClearFilters){
+        const btn = el(`<button class="btn btn-ghost" style="max-width:200px;margin:12px auto 0">✕ Clear Filters</button>`);
+        btn.addEventListener('click', opts.onClearFilters);
+        es.appendChild(btn);
+      }
+      box.appendChild(es);
+    }
+    return;
+  }
   tests.forEach(t=>{
     const kind = testKind(t), km = TEST_KIND_META[kind];
     const def = getTestDef(t);
@@ -5029,7 +5126,83 @@ function drawLiveForm(body){
   trackUnsub(unsub);
 }
 
+/* ================================================================
+   ADMIN — Tests workspace (Published Tests / Create Test / Results)
+   ----------------------------------------------------------------
+   Three internal tabs under the existing "Tests" nav entry — no new
+   top-level nav items. A single onSnapshot on COL.tests is shared by
+   Published Tests and the Results test-picker (avoids two listeners
+   reading the same collection); Results itself fetches attempts/
+   results only for ONE selected test at a time via loadTestResultsGroups(),
+   never the whole attempts/results collections. Published Tests is
+   the default view every time this screen opens.
+   ================================================================ */
 function renderAdminTests(container){
+  let sub = 'published'; // published | create | results
+  const tabs = el(`<div class="tab-filter">
+    <button data-s="published">📋 Published Tests</button>
+    <button data-s="create">➕ Create Test</button>
+    <button data-s="results">📊 Results</button>
+  </div>`);
+  container.appendChild(tabs);
+  const body = el(`<div></div>`);
+  container.appendChild(body);
+
+  let allTests = [];
+  let loaded = false; // true once the first test-list snapshot has arrived
+  let publishedRefresh = null, resultsRefresh = null;
+
+  function setTab(s){
+    sub = s;
+    $all('button',tabs).forEach(x=>x.classList.toggle('active', x.dataset.s===s));
+    draw();
+  }
+  $all('button',tabs).forEach(b=> b.classList.toggle('active', b.dataset.s===sub));
+  tabs.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    setTab(b.dataset.s);
+  });
+
+  function draw(){
+    body.innerHTML = '';
+    publishedRefresh = null; resultsRefresh = null;
+    if(sub==='create'){
+      // Create Test doesn't depend on the test list, so it never waits on `loaded`.
+      drawCreateTestSection(body, { onGoToPublished: ()=> setTab('published') });
+    } else if(!loaded){
+      body.appendChild(el(`<div class="spinner"></div>`));
+    } else if(sub==='results'){
+      resultsRefresh = drawResultsSection(body, ()=>allTests);
+    } else {
+      publishedRefresh = renderPublishedTestsSection(body, ()=>allTests, { onCreateTest: ()=> setTab('create') });
+    }
+  }
+  draw();
+
+  const unsubTests = db.collection(COL.tests).onSnapshot(snap=>{
+    allTests = []; snap.forEach(d=>allTests.push({id:d.id,...d.data()}));
+    const firstLoad = !loaded;
+    loaded = true;
+    if(firstLoad && sub !== 'create') draw();
+    else if(sub==='published' && publishedRefresh) publishedRefresh();
+    else if(sub==='results' && resultsRefresh) resultsRefresh();
+  }, err=>{ console.error('[admin-tests] load failed', err); });
+  trackUnsub(unsubTests);
+}
+
+/* ---------- 2.A Create Test — unchanged Manual Builder / Text Generator, just relocated
+   under this tab, plus a small success banner with a way back to Published Tests. ---------- */
+function drawCreateTestSection(container, opts){
+  opts = opts || {};
+  const banner = el(`<div class="card" id="createSuccessBanner" style="display:none;border-color:var(--success-brd);background:var(--success-bg)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="font-size:13px;color:var(--success);font-weight:600">✅ Test published!</div>
+      <button class="btn-sm btn-ghost" type="button" id="viewPublishedBtn">View Published Tests →</button>
+    </div>
+  </div>`);
+  container.appendChild(banner);
+  $('#viewPublishedBtn', banner).addEventListener('click', ()=> opts.onGoToPublished && opts.onGoToPublished());
+
   const tabs = el(`<div class="tab-filter"><button data-s="manual">🛠 Manual builder</button><button data-s="paste">📝 Text generator</button></div>`);
   container.appendChild(tabs);
   const body = el(`<div></div>`);
@@ -5040,24 +5213,124 @@ function renderAdminTests(container){
     const b=e.target.closest('button'); if(!b) return;
     sub = b.dataset.s;
     $all('button',tabs).forEach(x=>x.classList.toggle('active',x===b));
+    banner.style.display = 'none';
     draw();
   });
-  function draw(){ body.innerHTML=''; if(sub==='manual') drawManualBuilder(body); else drawTextGenerator(body); }
+  function showBanner(){ banner.style.display = ''; }
+  function draw(){ body.innerHTML=''; if(sub==='manual') drawManualBuilder(body, showBanner); else drawTextGenerator(body, showBanner); }
   draw();
+}
 
-  container.appendChild(el(`<div class="card-title" style="margin:14px 0 8px">Published tests</div>`));
+/* ---------- 2.B Published Tests — search, batch/subject/type filters, sort, Clear Filters,
+   match counter, and the two distinct empty states the spec calls for. Filters run over the
+   already-loaded `tests` array (getTests()) — no new Firestore query on every keystroke. ---------- */
+function renderPublishedTestsSection(container, getTests, opts){
+  opts = opts || {};
+  const searchWrap = el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="ptSearch" placeholder="Search tests by title..."></div>`);
+  container.appendChild(searchWrap);
+
+  const selRow = el(`<div class="row2" style="margin-bottom:10px">
+    <select id="ptBatch"><option value="">All Batches</option></select>
+    <select id="ptSubject"><option value="">All Subjects</option></select>
+  </div>`);
+  container.appendChild(selRow);
+
+  const selRow2 = el(`<div class="row2" style="margin-bottom:10px">
+    <select id="ptType">
+      <option value="">All Types</option>
+      <option value="live">🔴 Live</option>
+      <option value="regular">⏱ Regular</option>
+      <option value="practice">📚 Practice</option>
+    </select>
+    <select id="ptSort">
+      <option value="new">Newest First</option>
+      <option value="old">Oldest First</option>
+      <option value="title">Title A–Z</option>
+    </select>
+  </div>`);
+  container.appendChild(selRow2);
+
+  const toolbar = el(`<div class="filter-toolbar"><div class="count" id="ptCount"></div><button class="btn-sm btn-ghost" type="button" id="ptClear">✕ Clear Filters</button></div>`);
+  container.appendChild(toolbar);
+
   const listBox = el(`<div><div class="spinner"></div></div>`);
   container.appendChild(listBox);
-  const unsub = db.collection(COL.tests).onSnapshot(snap=>{
-    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
-    listBox.innerHTML='';
-    if(!items.length){ listBox.innerHTML='<div class="empty-state">No tests yet.</div>'; return; }
-    items.forEach(t=>{
+
+  function populateSelects(tests){
+    const batchSel = $('#ptBatch', selRow), curB = batchSel.value;
+    const batches = uniqueBatchesFromTests(tests);
+    batchSel.innerHTML = '<option value="">All Batches</option>' + batches.map(b=>`<option value="${esc(b.id)}">${esc(b.name)}</option>`).join('');
+    if(batches.some(b=>b.id===curB)) batchSel.value = curB;
+
+    const subjSel = $('#ptSubject', selRow), curS = subjSel.value;
+    const subjects = uniqueSubjects(tests);
+    subjSel.innerHTML = '<option value="">All Subjects</option>' + subjects.map(s=>`<option value="${esc(s.key)}">${esc(s.label)}</option>`).join('');
+    if(subjects.some(s=>s.key===curS)) subjSel.value = curS;
+  }
+
+  function clearFilters(){
+    $('#ptSearch', searchWrap).value = '';
+    $('#ptBatch', selRow).value = '';
+    $('#ptSubject', selRow).value = '';
+    $('#ptType', selRow2).value = '';
+    $('#ptSort', selRow2).value = 'new';
+    refresh();
+  }
+
+  function refresh(){
+    const tests = getTests();
+    populateSelects(tests);
+    const q = ($('#ptSearch',searchWrap).value||'').trim().toLowerCase();
+    const batchId = $('#ptBatch',selRow).value;
+    const subjKey = $('#ptSubject',selRow).value;
+    const typeVal = $('#ptType',selRow2).value;
+    const sortVal = $('#ptSort',selRow2).value;
+
+    let filtered = tests.filter(t=>{
+      if(batchId && (t.batchId||'') !== batchId) return false;
+      if(subjKey && normalizeSubjectKey(t.subject) !== subjKey) return false;
+      if(typeVal && testKind(t) !== typeVal) return false;
+      if(q){
+        const hay = ((t.title||'')+' '+(t.subject||'')+' '+(t.batchName||t.batch||'')).toLowerCase();
+        if(!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    filtered.sort((a,b)=>{
+      if(sortVal==='title') return (a.title||'').localeCompare(b.title||'');
+      const ta = tsToMs(a.createdAt) || 0, tb = tsToMs(b.createdAt) || 0;
+      return sortVal==='old' ? ta-tb : tb-ta;
+    });
+
+    $('#ptCount', toolbar).textContent = tests.length ? (filtered.length + ' of ' + tests.length + ' test' + (tests.length===1?'':'s')) : '';
+
+    listBox.innerHTML = '';
+    if(!tests.length){
+      const es = el(`<div class="empty-state"><div class="icon">📋</div>No published tests exist.</div>`);
+      const btn = el(`<button class="btn btn-primary" style="max-width:220px;margin:12px auto 0">+ Create Test</button>`);
+      btn.addEventListener('click', ()=> opts.onCreateTest && opts.onCreateTest());
+      es.appendChild(btn);
+      listBox.appendChild(es);
+      return;
+    }
+    if(!filtered.length){
+      const es = el(`<div class="empty-state"><div class="icon">🔍</div>No tests match your filters.</div>`);
+      const btn = el(`<button class="btn btn-ghost" style="max-width:200px;margin:12px auto 0">✕ Clear Filters</button>`);
+      btn.addEventListener('click', clearFilters);
+      es.appendChild(btn);
+      listBox.appendChild(es);
+      return;
+    }
+
+    filtered.forEach(t=>{
+      const kind = testKind(t), km = TEST_KIND_META[kind];
+      const created = tsToMs(t.createdAt);
       const card = el(`<div class="item-card">
-        <div class="item-top"><div class="item-icon">${t.type==='live'?'🔴':t.type==='selfpaced'?'⏱':'📚'}</div><div class="item-info">
+        <div class="item-top"><div class="item-icon">${km.icon}</div><div class="item-info">
           <div class="item-title">${esc(t.title)}</div>
-          <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?(' · '+esc(t.batchName||t.batch)):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}</div>
-          <div class="item-badges"><span class="badge badge-accent">${esc(t.type)}</span>${t.access==='paid'?'<span class="badge badge-paid">Paid</span>':'<span class="badge badge-free">Free</span>'}</div>
+          <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?(' · '+esc(t.batchName||t.batch)):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}${t.duration?(' · '+t.duration+' min'):''}</div>
+          ${created ? `<div class="item-meta">Created ${esc(fmtDate(created))}</div>` : ''}
+          <div class="item-badges"><span class="badge badge-accent">${km.icon} ${km.label}</span>${liveStatusBadge(t)}</div>
         </div></div>
         <div class="item-actions">
           ${Array.isArray(t.questions) && t.questions.length ? `
@@ -5075,8 +5348,127 @@ function renderAdminTests(container){
       }));
       listBox.appendChild(card);
     });
-  });
-  trackUnsub(unsub);
+  }
+
+  $('#ptSearch', searchWrap).addEventListener('input', refresh);
+  selRow.addEventListener('change', refresh);
+  selRow2.addEventListener('change', refresh);
+  $('#ptClear', toolbar).addEventListener('click', clearFilters);
+
+  refresh();
+  return refresh;
+}
+
+/* ---------- 2.C Central Results — a batch/subject/title-filtered test picker, then the SAME
+   loadTestResultsGroups()/renderTestResultGroups() the per-test Results button uses, so results
+   are never fetched or stored twice. Batch/Subject filter WHICH TEST'S results you're looking at
+   (attempts/results docs don't carry batchId themselves); Student name filters the loaded groups
+   client-side once a test is picked — no per-keystroke query. ---------- */
+function drawResultsSection(container, getTests){
+  container.appendChild(el(`<div class="card-title">📊 Results</div>`));
+
+  const searchWrap = el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="rsSearch" placeholder="Search tests by title..."></div>`);
+  container.appendChild(searchWrap);
+
+  const selRow = el(`<div class="row2" style="margin-bottom:10px">
+    <select id="rsBatch"><option value="">All Batches</option></select>
+    <select id="rsSubject"><option value="">All Subjects</option></select>
+  </div>`);
+  container.appendChild(selRow);
+
+  const toolbar = el(`<div class="filter-toolbar"><div class="count" id="rsCount"></div><button class="btn-sm btn-ghost" type="button" id="rsClear">✕ Clear Filters</button></div>`);
+  container.appendChild(toolbar);
+
+  const pickerBox = el(`<div id="rsPicker"></div>`);
+  container.appendChild(pickerBox);
+  const pane = el(`<div id="rsPane" style="margin-top:6px"></div>`);
+  container.appendChild(pane);
+
+  let selectedTestId = null;
+
+  function populateSelects(tests){
+    const batchSel = $('#rsBatch', selRow), curB = batchSel.value;
+    const batches = uniqueBatchesFromTests(tests);
+    batchSel.innerHTML = '<option value="">All Batches</option>' + batches.map(b=>`<option value="${esc(b.id)}">${esc(b.name)}</option>`).join('');
+    if(batches.some(b=>b.id===curB)) batchSel.value = curB;
+
+    const subjSel = $('#rsSubject', selRow), curS = subjSel.value;
+    const subjects = uniqueSubjects(tests);
+    subjSel.innerHTML = '<option value="">All Subjects</option>' + subjects.map(s=>`<option value="${esc(s.key)}">${esc(s.label)}</option>`).join('');
+    if(subjects.some(s=>s.key===curS)) subjSel.value = curS;
+  }
+
+  function refresh(){
+    const tests = getTests();
+    populateSelects(tests);
+    const q = ($('#rsSearch',searchWrap).value||'').trim().toLowerCase();
+    const batchId = $('#rsBatch',selRow).value;
+    const subjKey = $('#rsSubject',selRow).value;
+    let filtered = tests.filter(t=>{
+      if(batchId && (t.batchId||'') !== batchId) return false;
+      if(subjKey && normalizeSubjectKey(t.subject) !== subjKey) return false;
+      if(q && !(t.title||'').toLowerCase().includes(q)) return false;
+      return true;
+    });
+    filtered.sort((a,b)=> (tsToMs(b.createdAt)||0) - (tsToMs(a.createdAt)||0));
+    $('#rsCount', toolbar).textContent = tests.length ? (filtered.length + ' of ' + tests.length + ' test' + (tests.length===1?'':'s')) : '';
+
+    pickerBox.innerHTML = '';
+    if(!tests.length){ pickerBox.appendChild(el(`<div class="empty-state">No published tests exist yet.</div>`)); return; }
+    if(!filtered.length){
+      const es = el(`<div class="empty-state">No tests match your filters.</div>`);
+      const btn = el(`<button class="btn btn-ghost" style="max-width:200px;margin:12px auto 0">✕ Clear Filters</button>`);
+      btn.addEventListener('click', clearFilters);
+      es.appendChild(btn);
+      pickerBox.appendChild(es);
+      return;
+    }
+    filtered.forEach(t=>{
+      const km = TEST_KIND_META[testKind(t)];
+      const row = el(`<div class="item-card" style="cursor:pointer${selectedTestId===t.id?';border-color:var(--accent)':''}">
+        <div class="item-title" style="font-size:14px">${esc(t.title)}</div>
+        <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?' · '+esc(t.batchName||t.batch):''} · ${km.icon} ${km.label}</div>
+      </div>`);
+      row.addEventListener('click', ()=>{ selectedTestId = t.id; selectTest(t); refresh(); });
+      pickerBox.appendChild(row);
+    });
+  }
+
+  function clearFilters(){
+    $('#rsSearch', searchWrap).value = '';
+    $('#rsBatch', selRow).value = '';
+    $('#rsSubject', selRow).value = '';
+    refresh();
+  }
+
+  async function selectTest(t){
+    pane.innerHTML = '';
+    pane.appendChild(el(`<div class="card-title" style="margin-top:8px">📄 ${esc(t.title)}</div>`));
+    const nameWrap = el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="rsNameFilter" placeholder="Search student name..."></div>`);
+    pane.appendChild(nameWrap);
+    const groupsBox = el(`<div><div class="spinner"></div></div>`);
+    pane.appendChild(groupsBox);
+
+    let groups = null;
+    async function load(){
+      groupsBox.innerHTML = '<div class="spinner"></div>';
+      try{ groups = await loadTestResultsGroups(t.id); }
+      catch(e){ console.error(e); groupsBox.innerHTML = '<div class="empty-state">Could not load results.</div>'; return; }
+      paint();
+    }
+    function paint(){
+      renderTestResultGroups(groupsBox, t, groups, { nameFilter: $('#rsNameFilter',nameWrap).value, onReload: load });
+    }
+    $('#rsNameFilter', nameWrap).addEventListener('input', paint);
+    await load();
+  }
+
+  $('#rsSearch', searchWrap).addEventListener('input', refresh);
+  selRow.addEventListener('change', refresh);
+  $('#rsClear', toolbar).addEventListener('click', clearFilters);
+
+  refresh();
+  return refresh;
 }
 
 /* Admin confirmation sheet — exact wording + explicit Cancel / confirm buttons (a stray tap does nothing). */
@@ -5117,6 +5509,97 @@ async function adminDeleteTestHistory(t, studentId){
   return { attempts, results };
 }
 
+/* ---------- Results — shared data + render, used by BOTH the per-test sheet (openTestResults)
+   and the central Admin → Tests → Results tab, so results are never fetched or rendered by two
+   different code paths. loadTestResultsGroups() does the one-time fetch (no listener — the caller
+   decides when to reload, e.g. after Delete History); renderTestResultGroups() paints whatever
+   groups it's given into any container, with an optional client-side nameFilter (no new query). ---------- */
+async function loadTestResultsGroups(testId){
+  const [aSnap, rSnap] = await Promise.all([
+    db.collection(COL.testAttempts).where('testId','==',testId).get(),
+    db.collection(COL.testResults).where('testId','==',testId).get()
+  ]);
+  // one group per student: their attempt documents (any status) + pre-Phase-1 result rows
+  const groups = new Map();
+  const grp = id => { if(!groups.has(id)) groups.set(id, { studentId:id, name:'', attempts:[], legacy:[] }); return groups.get(id); };
+  aSnap.forEach(d => { const a = { id:d.id, ...d.data() }; grp(a.studentId).attempts.push(a); });
+  rSnap.forEach(d => { const r = d.data(); const g = grp(r.studentId); if(r.studentName) g.name = r.studentName; if(!r.attemptId) g.legacy.push(r); });
+  // a student who only has an unfinished attempt has no result row yet (so no name on file)
+  await Promise.all([...groups.values()].filter(g => !g.name).map(async g => {
+    try{ const s = await db.collection(COL.students).doc(g.studentId).get(); g.name = s.exists ? (s.data().fullName || '') : ''; }catch(e){}
+  }));
+  return groups;
+}
+
+function renderTestResultGroups(box, t, groups, opts){
+  opts = opts || {};
+  if(!groups.size){ box.innerHTML = '<div class="empty-state">No attempts yet.</div>'; return; }
+  const scoreRows = g => g.attempts.filter(a => a.status === 'completed').concat(g.legacy);
+  const best = g => scoreRows(g).reduce((m,r) => Math.max(m, Number(r.score) || 0), -Infinity);
+  let list = [...groups.values()];
+  if(opts.nameFilter){
+    const q = opts.nameFilter.trim().toLowerCase();
+    if(q) list = list.filter(g => (g.name||'').toLowerCase().includes(q));
+  }
+  list.sort((a,b) => best(b) - best(a));
+  box.innerHTML = '';
+  if(!list.length){ box.innerHTML = '<div class="empty-state">No students match your search.</div>'; return; }
+  list.forEach((g, i) => {
+    g.attempts.sort((a,b) => (a.attemptNumber||0) - (b.attemptNumber||0));
+    const done = scoreRows(g), b = best(g), inprog = g.attempts.some(a => a.status === 'in-progress');
+    const bestTxt = done.length ? `best ${fmtMarks(b)}/${fmtMarks(done.find(r => (Number(r.score)||0) === b).total)}` : 'no submitted attempt';
+    const card = el(`<div class="card" style="padding:12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="min-width:0"><div style="font-weight:700;font-size:13px">#${i+1} ${esc(g.name || 'Student')}</div>
+          <div style="font-size:11px;color:var(--text-dim)">${g.attempts.length + g.legacy.length} record${(g.attempts.length + g.legacy.length)===1?'':'s'} · ${esc(bestTxt)}${inprog ? ' · <span style="color:var(--warning)">unfinished attempt</span>' : ''}</div></div>
+        <button class="btn-sm btn-danger" type="button" data-del style="white-space:nowrap;flex-shrink:0">${icon('trash',15)}<span>Delete History</span></button>
+      </div>
+      <div data-rows></div></div>`);
+    const rows = $('[data-rows]', card);
+    const rowHTML = (label, sub, right, review) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border-soft);font-size:12px">
+        <div style="min-width:0;flex:1"><div style="font-weight:600">${esc(label)}</div><div style="font-size:11px;color:var(--text-dim)">${sub}</div></div>
+        <span style="font-weight:700">${right}</span>${review ? '<button class="btn-sm btn-ghost" type="button" data-rv>Review</button>' : ''}</div>`;
+    g.attempts.forEach(a => {
+      let node;
+      if(a.status === 'completed'){
+        node = el(rowHTML(attemptLabel(a.attemptNumber),
+          `${esc(fmtDateTime(tsToMs(a.submittedAt)))} · ✓ ${esc(a.correct)} · ✗ ${esc(a.wrong)} · — ${esc(a.skipped)}`,
+          `${esc(fmtMarks(a.score))}/${esc(fmtMarks(a.total))}`, true));
+        $('[data-rv]', node).addEventListener('click', () => {
+          const def = getTestDef(t);
+          if(!def.engine){ toast('Review isn\u2019t available for this test.'); return; }
+          openAttemptReview(t, def, attemptToView(a, def, { studentName: g.name }), { admin:true });
+        });
+      } else {
+        node = el(rowHTML(attemptLabel(a.attemptNumber), `In progress · started ${esc(fmtDateTime(tsToMs(a.startedAt)))}`, '—', false));
+      }
+      rows.appendChild(node);
+    });
+    g.legacy.forEach(r => rows.appendChild(el(rowHTML('Earlier result', esc(fmtDateTime(tsToMs(r.submittedAt))), `${esc(fmtMarks(r.score))}/${esc(fmtMarks(r.total))}`, false))));
+    $('[data-del]', card).addEventListener('click', async ev => {
+      const btn = ev.currentTarget;
+      const ok = await adminConfirmSheet({
+        title: 'Delete all attempt history for this student and this test?',
+        lines: [ `${g.name || 'This student'} · ${t.title || 'this test'}`,
+                 'This will permanently remove all attempts and results for this test.',
+                 'The student may then start the test again from Attempt 1.' ],
+        warn: inprog ? 'This student has an unfinished attempt. It will also be removed and can no longer be resumed.' : '',
+        cancel: 'Cancel', confirm: 'Delete History'
+      });
+      if(!ok) return;
+      btn.disabled = true;
+      try{
+        const n = await adminDeleteTestHistory(t, g.studentId);
+        toast(`History deleted (${n.attempts} attempt${n.attempts===1?'':'s'}, ${n.results} result${n.results===1?'':'s'})`);
+        if(opts.onReload) await opts.onReload();
+      }catch(e){
+        console.error(e); toast('Could not delete history — check your connection or permissions.'); btn.disabled = false;
+      }
+    });
+    box.appendChild(card);
+  });
+}
+
 function openTestResults(t){
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeRes">✕</button><div style="clear:both"></div>
@@ -5129,88 +5612,15 @@ function openTestResults(t){
 
   async function load(){
     box.innerHTML = '<div class="spinner"></div>';
-    let aSnap, rSnap;
-    try{
-      [aSnap, rSnap] = await Promise.all([
-        db.collection(COL.testAttempts).where('testId','==',t.id).get(),
-        db.collection(COL.testResults).where('testId','==',t.id).get()
-      ]);
-    }catch(e){ console.error(e); box.innerHTML = '<div class="empty-state">Could not load results.</div>'; return; }
-
-    // one group per student: their attempt documents (any status) + pre-Phase-1 result rows
-    const groups = new Map();
-    const grp = id => { if(!groups.has(id)) groups.set(id, { studentId:id, name:'', attempts:[], legacy:[] }); return groups.get(id); };
-    aSnap.forEach(d => { const a = { id:d.id, ...d.data() }; grp(a.studentId).attempts.push(a); });
-    rSnap.forEach(d => { const r = d.data(); const g = grp(r.studentId); if(r.studentName) g.name = r.studentName; if(!r.attemptId) g.legacy.push(r); });
-    // a student who only has an unfinished attempt has no result row yet (so no name on file)
-    await Promise.all([...groups.values()].filter(g => !g.name).map(async g => {
-      try{ const s = await db.collection(COL.students).doc(g.studentId).get(); g.name = s.exists ? (s.data().fullName || '') : ''; }catch(e){}
-    }));
-    if(!groups.size){ box.innerHTML = '<div class="empty-state">No attempts yet.</div>'; return; }
-
-    const scoreRows = g => g.attempts.filter(a => a.status === 'completed').concat(g.legacy);
-    const best = g => scoreRows(g).reduce((m,r) => Math.max(m, Number(r.score) || 0), -Infinity);
-    const list = [...groups.values()].sort((a,b) => best(b) - best(a));
-    box.innerHTML = '';
-    list.forEach((g, i) => {
-      g.attempts.sort((a,b) => (a.attemptNumber||0) - (b.attemptNumber||0));
-      const done = scoreRows(g), b = best(g), inprog = g.attempts.some(a => a.status === 'in-progress');
-      const bestTxt = done.length ? `best ${fmtMarks(b)}/${fmtMarks(done.find(r => (Number(r.score)||0) === b).total)}` : 'no submitted attempt';
-      const card = el(`<div class="card" style="padding:12px;margin-bottom:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <div style="min-width:0"><div style="font-weight:700;font-size:13px">#${i+1} ${esc(g.name || 'Student')}</div>
-            <div style="font-size:11px;color:var(--text-dim)">${g.attempts.length + g.legacy.length} record${(g.attempts.length + g.legacy.length)===1?'':'s'} · ${esc(bestTxt)}${inprog ? ' · <span style="color:var(--warning)">unfinished attempt</span>' : ''}</div></div>
-          <button class="btn-sm btn-danger" type="button" data-del style="white-space:nowrap;flex-shrink:0">${icon('trash',15)}<span>Delete History</span></button>
-        </div>
-        <div data-rows></div></div>`);
-      const rows = $('[data-rows]', card);
-      const rowHTML = (label, sub, right, review) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border-soft);font-size:12px">
-          <div style="min-width:0;flex:1"><div style="font-weight:600">${esc(label)}</div><div style="font-size:11px;color:var(--text-dim)">${sub}</div></div>
-          <span style="font-weight:700">${right}</span>${review ? '<button class="btn-sm btn-ghost" type="button" data-rv>Review</button>' : ''}</div>`;
-      g.attempts.forEach(a => {
-        let node;
-        if(a.status === 'completed'){
-          node = el(rowHTML(attemptLabel(a.attemptNumber),
-            `${esc(fmtDateTime(tsToMs(a.submittedAt)))} · ✓ ${esc(a.correct)} · ✗ ${esc(a.wrong)} · — ${esc(a.skipped)}`,
-            `${esc(fmtMarks(a.score))}/${esc(fmtMarks(a.total))}`, true));
-          $('[data-rv]', node).addEventListener('click', () => {
-            const def = getTestDef(t);
-            if(!def.engine){ toast('Review isn\u2019t available for this test.'); return; }
-            openAttemptReview(t, def, attemptToView(a, def, { studentName: g.name }), { admin:true });
-          });
-        } else {
-          node = el(rowHTML(attemptLabel(a.attemptNumber), `In progress · started ${esc(fmtDateTime(tsToMs(a.startedAt)))}`, '—', false));
-        }
-        rows.appendChild(node);
-      });
-      g.legacy.forEach(r => rows.appendChild(el(rowHTML('Earlier result', esc(fmtDateTime(tsToMs(r.submittedAt))), `${esc(fmtMarks(r.score))}/${esc(fmtMarks(r.total))}`, false))));
-      $('[data-del]', card).addEventListener('click', async ev => {
-        const btn = ev.currentTarget;
-        const ok = await adminConfirmSheet({
-          title: 'Delete all attempt history for this student and this test?',
-          lines: [ `${g.name || 'This student'} · ${t.title || 'this test'}`,
-                   'This will permanently remove all attempts and results for this test.',
-                   'The student may then start the test again from Attempt 1.' ],
-          warn: inprog ? 'This student has an unfinished attempt. It will also be removed and can no longer be resumed.' : '',
-          cancel: 'Cancel', confirm: 'Delete History'
-        });
-        if(!ok) return;
-        btn.disabled = true;
-        try{
-          const n = await adminDeleteTestHistory(t, g.studentId);
-          toast(`History deleted (${n.attempts} attempt${n.attempts===1?'':'s'}, ${n.results} result${n.results===1?'':'s'})`);
-          await load();
-        }catch(e){
-          console.error(e); toast('Could not delete history — check your connection or permissions.'); btn.disabled = false;
-        }
-      });
-      box.appendChild(card);
-    });
+    let groups;
+    try{ groups = await loadTestResultsGroups(t.id); }
+    catch(e){ console.error(e); box.innerHTML = '<div class="empty-state">Could not load results.</div>'; return; }
+    renderTestResultGroups(box, t, groups, { onReload: load });
   }
   load();
 }
 
-function drawManualBuilder(body){
+function drawManualBuilder(body, onPublished){
   let questions = [];
   body.appendChild(el(`<div>
     <div class="card">
@@ -5340,6 +5750,7 @@ function drawManualBuilder(body){
     if(live.error){ toast(live.error); return; }
     if(!await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions, live })) return;
     questions = []; refreshQList(); $('#mTitle',body).value=''; batchSel.value='';
+    if(onPublished) onPublished();
   });
 }
 
@@ -5725,7 +6136,7 @@ function parseTestText(raw){
   return { questions, errors };
 }
 
-function drawTextGenerator(body){
+function drawTextGenerator(body, onPublished){
   body.appendChild(el(`
     <div class="card">
       <div class="card-title">📝 Create test from text</div>
@@ -5788,6 +6199,7 @@ function drawTextGenerator(body){
     const meta = { title, subject, correctMark: marks, wrongMark: -neg, duration: Math.max(0, parseInt($('#tgDuration',body).value) || 0), answerButtonLayout: $('#tgLayout',body).value };
     if(!await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions: r.questions, live, source:'text' })) return;
     $('#tgTitle',body).value=''; $('#tgText',body).value=''; $('#tgResult',body).innerHTML=''; batchSel.value='';
+    if(onPublished) onPublished();
   });
 }
 
