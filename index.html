@@ -1281,6 +1281,8 @@ function showAnnouncementNotification(a){
   navigator.serviceWorker.ready
     .then(registration => registration.showNotification(title, {
       body,
+      icon: 'icon-192.png',                 // same cached static asset the app already ships
+      data: { announcementId: a.id },       // read by the service worker's notificationclick handler
       tag: 'ann-' + a.id // same id -> same OS notification slot; belt-and-suspenders against a duplicate ever stacking
     }))
     .catch(error => console.error('[notifications] could not show notification:', error));
@@ -7868,6 +7870,30 @@ function renderAdminCalendar(container){
 /* ================================================================
    12) PWA — service worker registration + install button
    ================================================================ */
+/* Notification tap -> app. service-worker.js' notificationclick handler focuses the installed app/tab and either
+   posts {type:'tms-open-announcements'} to it (already open) or opens index.html?open=announcements (closed).
+   Both only switch the visible tab — nothing is marked read or written; "Got it" stays the only thing that does.
+   This is NOT push: it only runs after the student taps a notification the open-app listener already showed. */
+(function setupNotificationClickRouting(){
+  try{
+    const u = new URL(location.href);
+    if(u.searchParams.get('open') === 'announcements'){
+      STATE.studentTab = 'announcements';   // used once the student session is up (or right after they sign in)
+      u.searchParams.delete('open');
+      history.replaceState(null, '', u.pathname + u.search + u.hash);
+    }
+  }catch(e){}
+  if(!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.addEventListener('message', ev=>{
+    const d = ev && ev.data;
+    if(!d || d.type !== 'tms-open-announcements') return;
+    if(STATE.screen !== 'student' || CURRENT_ROLE !== 'student') return;   // signed out / admin: leave the app where it is
+    if(TMS_ACTIVE) return;                                                  // never pull a student out of a running test
+    STATE.studentTab = 'announcements';
+    renderScreen();
+  });
+})();
+
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('service-worker.js').catch(err=>console.error('SW register failed:', err));
