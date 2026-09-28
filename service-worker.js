@@ -8,7 +8,7 @@
 // resilience. Firebase, Firestore's realtime channel, Google Drive,
 // YouTube, and MathJax's CDN are never touched by this file at all.
 
-const CACHE_NAME = 'atomic-minds-v8'; // bumped to match this file's own versioning convention
+const CACHE_NAME = 'atomic-minds-v9'; // v9: adds the notificationclick handler
 const STATIC_ASSETS = ['./manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -43,6 +43,30 @@ self.addEventListener('activate', (event) => {
       ))
       .then(() => self.clients.claim())
   );
+});
+
+// Tapping a browser notification (shown by index.html while the app is open
+// but not in the foreground — see showAnnouncementNotification) brings the
+// app forward. If a window of this app already exists, focus it and tell it
+// to show Announcements; otherwise open the app straight onto Announcements.
+// This is NOT push: nothing here runs unless the student taps a notification
+// that the page itself displayed. No data is fetched or written here.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const scopeUrl = self.registration.scope;
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const ours = wins.filter((c) => c.url.startsWith(scopeUrl));
+    const client = ours.find((c) => c.focused) || ours.find((c) => c.visibilityState === 'visible') || ours[0];
+    if (client) {
+      try { await client.focus(); } catch (err) { /* focus can be refused; still route the page */ }
+      client.postMessage({ type: 'tms-open-announcements' });
+      return;
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(new URL('./index.html?open=announcements', scopeUrl).href);
+    }
+  })());
 });
 
 self.addEventListener('fetch', (event) => {
