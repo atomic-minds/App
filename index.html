@@ -1273,8 +1273,11 @@ function showAnnouncementNotification(a){
     // but bail cleanly rather than let navigator.serviceWorker throw.
     return;
   }
-  const title = a.title || 'Atomic Minds';
-  const body = a.message || ('New announcement' + (a.batchName ? (' for ' + a.batchName) : ''));
+  // Concise, non-personal content: fixed app title + a short one-line preview of the announcement.
+  const raw = String(a.message || a.title || '').replace(/\s+/g,' ').trim();
+  const clipped = raw.length > 110 ? (raw.slice(0,107) + '\u2026') : raw;
+  const title = 'Atomic Minds';
+  const body = 'New announcement' + (clipped ? (': ' + clipped) : '');
   navigator.serviceWorker.ready
     .then(registration => registration.showNotification(title, {
       body,
@@ -1291,12 +1294,143 @@ function showAnnouncementNotification(a){
    permission — kept this way so a student who enables notifications
    mid-session (Settings tab) starts getting them immediately, with
    nothing here needing to notice that change or restart anything. */
+/* ----------------------------------------------------------------
+   HOME DATA HUB (Dashboard "What's Next" + Calendar "Upcoming Class")
+   ----------------------------------------------------------------
+   One session-scoped set of listeners, started/stopped together with the
+   announcement listener below (same lifetime, same reason for NOT using
+   trackUnsub(): renderScreen() tears those down on every tab switch, which
+   would re-read everything each time the student returns to the Dashboard).
+   - announcements: NOT a second listener — HOME.ann is fed by the existing
+     announcement listener in startAnnouncementNotifications().
+   - oneTime / rules: classSchedules (today .. +HOME_LOOKAHEAD_DAYS, same
+     query shape + index as the Calendar) and active classScheduleRules
+     (expanded client-side by expandRuleOccurrences(), never stored).
+   - liveTests: tests of type 'live' only (equality filter on top of the
+     batchId 'in' filter — same shape as announcements/rules, no new index).
+   Every query is constrained to the rule-verified id list from
+   syncAndGetMyBatchIds(); firestore.rules re-checks it server-side. The
+   Dashboard batch selector only NARROWS what is shown (client-side, via
+   selectedContentIds()) — it never widens or authorizes anything. */
+const HOME_LOOKAHEAD_DAYS = 60;
+const WN_CLASS_WINDOW_MS = 36*3600*1000;   // "What's Next" surfaces a class starting within 36h (or already running)
+const WN_TEST_WINDOW_MS  = 72*3600*1000;   // ...and a Live test starting within 72h
+const HOME = { batchIds:[], ann:null, oneTime:null, rules:null, liveTests:null, unsubs:[], subs:new Set() };
+const ANN_READ_SUBS = new Set();
+function homeEmit(){ Array.from(HOME.subs).forEach(fn=>{ try{ fn(); }catch(e){ console.error('[home] subscriber failed:', e); } }); }
+function homeSubscribe(fn){ HOME.subs.add(fn); return ()=>{ HOME.subs.delete(fn); }; }
+function annReadEmit(){ Array.from(ANN_READ_SUBS).forEach(fn=>{ try{ fn(); }catch(e){ console.error('[announcements] read subscriber failed:', e); } }); }
+function annReadSubscribe(fn){ ANN_READ_SUBS.add(fn); return ()=>{ ANN_READ_SUBS.delete(fn); }; }
+function homeReady(){ return HOME.ann !== null && HOME.oneTime !== null && HOME.rules !== null && HOME.liveTests !== null; }
+
+function startHomeDataListeners(ids){
+  stopHomeDataListeners();
+  HOME.batchIds = ids.slice();
+  const t = new Date();
+  const today = todayYMD();
+  const h = new Date(t.getFullYear(), t.getMonth(), t.getDate() + HOME_LOOKAHEAD_DAYS);
+  const horizon = ymd(h.getFullYear(), h.getMonth(), h.getDate());
+  // A failed listener must not leave the Dashboard spinning forever: treat it as "nothing to show".
+  const fail = key => err => { console.error('[home] ' + key + ' listener failed:', err); if(HOME[key] === null) HOME[key] = []; homeEmit(); };
+  HOME.unsubs.push(listenScheduleByBatchIds(ids, today, horizon, items=>{ HOME.oneTime = items; homeEmit(); }, fail('oneTime')));
+  HOME.unsubs.push(listenContentByBatchIds(COL.classScheduleRules, ids, {field:'status', value:'active'}, items=>{ HOME.rules = items; homeEmit(); }, fail('rules')));
+  HOME.unsubs.push(listenContentByBatchIds(COL.tests, ids, {field:'type', value:'live'}, items=>{ HOME.liveTests = items; homeEmit(); }, fail('liveTests')));
+}
+function stopHomeDataListeners(){
+  HOME.unsubs.forEach(u=>{ try{ u(); }catch(e){} });
+  HOME.unsubs = [];
+  HOME.batchIds = []; HOME.ann = null; HOME.oneTime = null; HOME.rules = null; HOME.liveTests = null;
+}
+
+function schedMs(dateStr, hhmm, fallback){
+  const d = String(dateStr||'').split('-').map(Number);
+  const t = String(hhmm || fallback || '').split(':').map(Number);
+  if(d.length !== 3 || d.some(isNaN) || t.length < 2 || t.some(isNaN)) return NaN;
+  return new Date(d[0], d[1]-1, d[2], t[0], t[1]).getTime();
+}
+function fmtClock12(hhmm){
+  const m = /^(\d{1,2}):(\d{2})/.exec(hhmm || '');
+  if(!m) return '';
+  let hh = Number(m[1]); const ap = hh >= 12 ? 'PM' : 'AM'; hh = hh % 12 || 12;
+  return hh + ':' + m[2] + ' ' + ap;
+}
+function homeDayLabel(dateStr){
+  const t = new Date();
+  if(dateStr === todayYMD()) return 'Today';
+  const tm = new Date(t.getFullYear(), t.getMonth(), t.getDate()+1);
+  if(dateStr === ymd(tm.getFullYear(), tm.getMonth(), tm.getDate())) return 'Tomorrow';
+  const d = String(dateStr||'').split('-').map(Number);
+  if(d.length !== 3 || d.some(isNaN)) return String(dateStr||'');
+  return new Date(d[0], d[1]-1, d[2]).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
+}
+function homeWhenLabel(ms){
+  const d = new Date(ms);
+  return homeDayLabel(ymd(d.getFullYear(), d.getMonth(), d.getDate())) + ' \u00b7 ' + fmtClock12(pad2(d.getHours()) + ':' + pad2(d.getMinutes()));
+}
+// Client-side VIEW scope only (selected batch + General Demo) over data the rules already authorized.
+function homeScopeSet(){ return new Set(selectedContentIds(HOME.batchIds)); }
+
+// One-time classes + expanded recurring occurrences (cancelled ones dropped; reschedules/overrides are
+// already resolved by expandRuleOccurrences()) with real start/end timestamps.
+function homeClassOccurrences(){
+  const t = new Date(), today = todayYMD();
+  const h = new Date(t.getFullYear(), t.getMonth(), t.getDate() + HOME_LOOKAHEAD_DAYS);
+  const horizon = ymd(h.getFullYear(), h.getMonth(), h.getDate());
+  const scope = homeScopeSet();
+  const out = [];
+  (HOME.oneTime || []).forEach(c=>{
+    if(scope.has(c.batchId) && c.status !== 'cancelled' && c.date >= today && c.date <= horizon) out.push(c);
+  });
+  (HOME.rules || []).forEach(r=>{
+    if(!scope.has(r.batchId)) return;
+    expandRuleOccurrences(r, today, horizon).forEach(o=>{ if(o.status !== 'cancelled') out.push(o); });
+  });
+  return out
+    .map(c=>({ c, startMs: schedMs(c.date, c.startTime, '00:00'), endMs: schedMs(c.date, c.endTime, '23:59') }))
+    .filter(x=> !isNaN(x.startMs) && !isNaN(x.endMs));
+}
+// includeOngoing: also count a class that has started but not ended yet. withinMs: optional start-time horizon.
+function homeNextClass(opts){
+  opts = opts || {};
+  const now = Date.now();
+  let best = null;
+  homeClassOccurrences().forEach(x=>{
+    if(!(opts.includeOngoing ? x.endMs > now : x.startMs > now)) return;
+    if(opts.withinMs != null && x.startMs > now + opts.withinMs) return;
+    if(!best || x.startMs < best.startMs) best = x;
+  });
+  return best;
+}
+function homeNextLiveTest(withinMs){
+  const now = Date.now(), scope = homeScopeSet();
+  let best = null;
+  (HOME.liveTests || []).forEach(t=>{
+    if(!scope.has(t.batchId) || testKind(t) !== 'live') return;
+    const s = tsToMs(t.liveStartAt);
+    if(s == null || s <= now) return;
+    if(withinMs != null && s > now + withinMs) return;
+    if(!best || s < best.startMs) best = { t, startMs:s };
+  });
+  return best;
+}
+// Newest first. Unread = not in students/{uid}.readAnnouncementIds (the existing read-state).
+function homeUnreadAnnouncements(){
+  const read = new Set((CURRENT_PROFILE && CURRENT_PROFILE.readAnnouncementIds) || []);
+  return (HOME.ann || []).filter(a=> !read.has(a.id))
+    .sort((a,b)=> (tsToMs(b.createdAt)||0) - (tsToMs(a.createdAt)||0));
+}
+// Last recorded class opened on THIS device (localStorage only), keyed per student so a shared device never leaks.
+function learnKey(uid){ return 'tms:lastLearning:' + uid; }
+
+let NOTIF_GEN = 0;   // bumped on every start/stop, so a slow batch-id lookup that resolves after a logout can't attach listeners for a signed-out session
 function startAnnouncementNotifications(){
   if(NOTIF_UNSUB) return;
+  const gen = ++NOTIF_GEN;
   let seenIds = null; // null = first snapshot not processed yet
   syncAndGetMyBatchIds().then(ids=>{
-    if(!ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
+    if(gen !== NOTIF_GEN || !ids.length || NOTIF_UNSUB) return; // logged out (or already started elsewhere) while this was resolving
     NOTIF_UNSUB = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
+      HOME.ann = items; homeEmit();   // Dashboard "What's Next" reuses this same listener's data — no second announcement listener
       if(seenIds === null){
         // First delivery after (re)attaching is the existing backlog, not
         // "new" — mark it all seen and never notify for it (Part G).
@@ -1308,12 +1442,18 @@ function startAnnouncementNotifications(){
         seenIds.add(a.id);
         showAnnouncementNotification(a);
       });
-    }, err=> console.error('[notifications] announcement listener failed:', err));
-  });
+    }, err=>{
+      console.error('[notifications] announcement listener failed:', err);
+      if(HOME.ann === null){ HOME.ann = []; homeEmit(); }
+    });
+    startHomeDataListeners(ids);
+  }).catch(e=> console.error('[notifications] could not start:', e));
 }
 
 function stopAnnouncementNotifications(){
+  NOTIF_GEN++;
   if(NOTIF_UNSUB){ try{ NOTIF_UNSUB(); }catch(e){} NOTIF_UNSUB = null; }
+  stopHomeDataListeners();
 }
 
 /* ================================================================
@@ -1469,9 +1609,8 @@ function renderDashboardTab(container){
       <div id="dashBatchSelectArea"></div>
     </div>
   `));
-  const tmsResumeSlot = el(`<div></div>`);
-  container.appendChild(tmsResumeSlot);
-  tmsPaintResumeCard(tmsResumeSlot);   // Phase 1.2 — shows an unfinished Live/Regular attempt with a Resume Test button
+  renderDashWhatsNext(container);        // Layer 1 — unfinished attempt (Phase 1.2 Resume card) / next class / next Live test / unread announcement
+  renderDashContinueLearning(container); // Layer 2 — last recorded class opened on this device (hidden when none)
   const batchLine = $('#dashBatchLine', container);
   const selectArea = $('#dashBatchSelectArea', container);
   const availBox = el(`<div id="availBatchArea"></div>`);
@@ -1505,25 +1644,138 @@ function renderDashboardTab(container){
       renderBatchSelector(selectArea, active);
       availBox.innerHTML = '';
     }
+    homeEmit(); // selected batch may have just been set/changed — repaint "What's Next" against it (view scope only)
   }, err=>{ console.error(err); batchLine.textContent = p.batch || 'No batch assigned yet'; });
   trackUnsub(unsub);
-  const links = el(`
-    <div class="card">
-      <div class="card-title">📌 Quick links</div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="classes">🎬 Go to Classes</button>
-        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="tests">📝 Go to Tests</button>
-        <button class="btn btn-ghost" style="justify-content:flex-start" data-go="notes">📄 Go to Notes &amp; Assignments</button>
-      </div>
-    </div>
-  `);
-  links.addEventListener('click', e=>{
-    const b = e.target.closest('button'); if(!b) return;
-    STATE.studentTab = b.dataset.go;
-    renderScreen();
-  });
-  container.appendChild(links);
   renderBannerCarousel(container);
+}
+
+/* ================================================================
+   DASHBOARD — Layer 1 "What's Next" + Layer 2 "Continue Learning"
+   ----------------------------------------------------------------
+   No Firestore reads/listeners of its own: everything comes from the
+   session-scoped HOME hub above, the existing unfinished-attempt cache
+   (tmsLoadUnfinished) and localStorage. Priority: unfinished attempt >
+   class (running or starting within 36h) > Live test starting within 72h
+   > newest unread announcement > empty state. Rendering something here
+   NEVER marks an announcement read — only the explicit "Got it" does. */
+function dashGoCalendarOn(dateStr){
+  const p = String(dateStr||'').split('-').map(Number);
+  if(p.length === 3 && !p.some(isNaN)){ STATE.calendarYear = p[0]; STATE.calendarMonthIdx = p[1]-1; STATE.calendarSelectedDate = dateStr; }
+  STATE.studentTab = 'calendar';
+  renderScreen();
+}
+
+function renderDashWhatsNext(container){
+  const wrap = el(`<div>
+    <div class="card-title" style="margin:4px 2px 8px">✨ What's Next</div>
+    <div data-wn="resume"></div>
+    <div data-wn="other"></div>
+  </div>`);
+  container.appendChild(wrap);
+  const resumeSlot = $('[data-wn="resume"]', wrap);
+  const other = $('[data-wn="other"]', wrap);
+  let unfinished = null;   // null = the unfinished-attempt lookup hasn't answered yet
+
+  function paintOther(){
+    other.innerHTML = '';
+    if(unfinished === null){ other.appendChild(el(`<div class="spinner"></div>`)); return; }
+    const unread = HOME.ann === null ? [] : homeUnreadAnnouncements();
+    let shown = null;
+    if(unfinished.length){
+      shown = 'resume';   // the existing Resume card (resumeSlot) is the item; nothing else replaces it
+    } else if(!homeReady()){
+      other.appendChild(el(`<div class="spinner"></div>`)); return;
+    } else {
+      const cls = homeNextClass({ includeOngoing:true, withinMs:WN_CLASS_WINDOW_MS });
+      const tst = cls ? null : homeNextLiveTest(WN_TEST_WINDOW_MS);
+      if(cls){
+        shown = 'class';
+        const c = cls.c, now = Date.now(), running = cls.startMs <= now;
+        const card = el(`<div class="card">
+          <span class="badge badge-accent">📅 ${running ? 'Class in progress' : 'Upcoming Class'}</span>
+          <div style="font-size:15px;font-weight:700;margin:8px 0 2px">${esc(c.title||'Class')}${c.topic?(' — '+esc(c.topic)):''}</div>
+          <div style="font-size:12.5px;color:var(--text-dim)">${esc(homeDayLabel(c.date))} · ${esc(fmtClock12(c.startTime))}${c.endTime?(' – '+esc(fmtClock12(c.endTime))):''}</div>
+          <button class="btn btn-primary" type="button" style="margin-top:12px">View Class</button>
+        </div>`);
+        $('button', card).addEventListener('click', ()=> dashGoCalendarOn(c.date));
+        other.appendChild(card);
+      } else if(tst){
+        shown = 'test';
+        const t = tst.t;
+        const card = el(`<div class="card">
+          <span class="badge badge-live">🔴 Upcoming Live Test</span>
+          <div style="font-size:15px;font-weight:700;margin:8px 0 2px">${esc(t.title||'Test')}</div>
+          <div style="font-size:12.5px;color:var(--text-dim)">${esc(homeWhenLabel(tst.startMs))}${t.subject?(' · '+esc(t.subject)):''}</div>
+          <button class="btn btn-primary" type="button" style="margin-top:12px">View Test</button>
+        </div>`);
+        $('button', card).addEventListener('click', ()=>{ STATE.studentTab = 'tests'; renderScreen(); });
+        other.appendChild(card);
+      } else if(unread.length){
+        shown = 'announcement';
+        const a = unread[0];
+        const card = el(`<div class="card">
+          <span class="badge badge-paid">🆕 New Announcement</span>
+          <div style="font-size:15px;font-weight:700;margin:8px 0 2px">${esc(a.title||'Announcement')}</div>
+          <div style="font-size:12.5px;color:var(--text-dim);white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">${esc(a.message||'')}</div>
+          <button class="btn btn-primary" type="button" style="margin-top:12px">Got it ✓</button>
+        </div>`);
+        const btn = $('button', card);
+        btn.addEventListener('click', ()=>{ btn.disabled = true; markAnnouncementRead(a.id); });
+        other.appendChild(card);
+      }
+    }
+    if(!shown){
+      other.appendChild(el(`<div class="card" style="text-align:center;font-size:13px;color:var(--text-dim);line-height:1.6">You're all caught up ✨<br>Nothing needs your attention right now.</div>`));
+      return;
+    }
+    const more = shown === 'announcement' ? unread.length - 1 : unread.length;
+    if(more > 0){
+      const line = el(`<button class="btn btn-ghost" type="button" style="font-size:13px;padding:10px;margin-bottom:12px">📢 ${more} new announcement${more>1?'s':''} →</button>`);
+      line.addEventListener('click', ()=>{ STATE.studentTab = 'announcements'; renderScreen(); });
+      other.appendChild(line);
+    }
+  }
+
+  // The existing Phase 1.2 card is painted exactly ONCE per Dashboard render (an expired attempt
+  // auto-finishes from inside it, so it must never be re-painted on every hub update).
+  tmsPaintResumeCard(resumeSlot, items=>{ unfinished = items; paintOther(); });
+  trackUnsub(homeSubscribe(paintOther));
+  trackUnsub(annReadSubscribe(paintOther));
+  paintOther();
+}
+
+function renderDashContinueLearning(container){
+  if(!CURRENT_USER) return;
+  const item = tmsLsGet(learnKey(CURRENT_USER.uid));
+  if(!item || item.type !== 'recordedClass' || !item.id || !item.title) return;   // nothing valid -> render nothing at all
+  const wrap = el(`<div>
+    <div class="card-title" style="margin:4px 2px 8px">▶ Continue Learning</div>
+    <div class="card">
+      <div style="font-size:15px;font-weight:700">${esc(item.title)}</div>
+      ${item.subject?`<div style="font-size:12.5px;color:var(--text-dim);margin-top:2px">${esc(item.subject)}</div>`:''}
+      <button class="btn btn-primary" type="button" style="margin-top:12px">Continue →</button>
+    </div>
+  </div>`);
+  const btn = $('button', wrap);
+  function gone(){ tmsLsDel(learnKey(CURRENT_USER.uid)); wrap.remove(); toast('That class is no longer available'); }
+  btn.addEventListener('click', async ()=>{
+    btn.disabled = true;
+    try{
+      // The card itself is local-only (zero reads). Opening fetches the ONE video document, so
+      // firestore.rules — not this stored pointer — decide whether the student may still watch it.
+      const snap = await db.collection(COL.videos).doc(item.id).get();
+      if(!snap.exists){ gone(); return; }
+      openVideoPlayer({ id:snap.id, ...snap.data() });
+      btn.disabled = false;
+    }catch(err){
+      if(err && err.code === 'permission-denied'){ gone(); return; }
+      console.error('[continue-learning] could not open:', err);
+      toast('Could not open — check your connection');
+      btn.disabled = false;
+    }
+  });
+  container.appendChild(wrap);
 }
 
 /* Google Drive "share" links (drive.google.com/file/d/ID/view) are an
@@ -1645,6 +1897,7 @@ function renderBatchSelector(container, activeEnrollments){
     STUDENT_SELECTED_BATCH_ID = select.value;
     const label = select.selectedOptions[0] ? select.selectedOptions[0].textContent : '';
     toast('Now viewing: ' + label);
+    homeEmit(); // repaint "What's Next" for the newly selected batch (client-side filter only)
   });
   container.appendChild(field);
 }
@@ -2061,6 +2314,34 @@ function renderCalendarTab(container){
   container.appendChild(grid);
   const dayList = el(`<div id="calDayList"><div class="spinner"></div></div>`);
   container.appendChild(dayList);
+  // "Upcoming Class": nearest future class (same selected-batch view scope as the grid above), derived from the
+  // session-scoped HOME hub — no listener or query of its own, nothing generated or stored per occurrence.
+  const upBox = el(`<div id="calUpcoming"></div>`);
+  container.appendChild(upBox);
+  function paintUpcoming(){
+    upBox.innerHTML = '';
+    if(!homeReady()) return;
+    upBox.appendChild(el(`<div class="card-title" style="margin:14px 0 8px">⏭ Upcoming Class</div>`));
+    const nx = homeNextClass({ includeOngoing:false });
+    if(!nx){ upBox.appendChild(el(`<div class="empty-state" style="padding:16px 20px">No upcoming classes.</div>`)); return; }
+    const c = nx.c;
+    const card = el(`<div class="item-card">
+      <div class="item-top"><div class="item-icon">📅</div><div class="item-info">
+        <div class="item-title">${esc(c.title||'Class')}${c.topic?(' — '+esc(c.topic)):''}</div>
+        <div class="item-meta">${esc(homeDayLabel(c.date))} · ${esc(fmtClock12(c.startTime))}</div>
+        <div class="item-badges"><span class="badge badge-muted">${esc(c.batchName||'')}</span></div>
+      </div>
+      <button class="btn-sm btn-ghost" type="button" data-view style="flex-shrink:0;align-self:center">View →</button></div>
+    </div>`);
+    $('[data-view]', card).addEventListener('click', ()=>{
+      const p = String(c.date).split('-').map(Number);
+      STATE.calendarYear = p[0]; STATE.calendarMonthIdx = p[1]-1; STATE.calendarSelectedDate = c.date;
+      renderScreen();
+    });
+    upBox.appendChild(card);
+  }
+  trackUnsub(homeSubscribe(paintUpcoming));
+  paintUpcoming();
 
   $('#calPrev', header).addEventListener('click', ()=>{
     STATE.calendarMonthIdx--;
@@ -2257,6 +2538,10 @@ function renderLiveList(box, items){
 }
 
 function openVideoPlayer(v){
+  // "Continue Learning" pointer — device-local only (no Firestore write, no progress/percentage, no watch tracking).
+  if(CURRENT_USER && v && v.id){
+    tmsLsSet(learnKey(CURRENT_USER.uid), { type:'recordedClass', id:v.id, title:v.title||'', subject:v.subject||'', savedAt:Date.now() });
+  }
   const overlay = el(`
     <div class="overlay open">
       <div class="sheet" style="padding:0;max-height:96vh">
@@ -2905,7 +3190,7 @@ async function tmsConfirmFinished(attemptId, testId){
 // timer to submit it while the app is closed, but the instant the app runs again (this card painting
 // is that moment) it finishes the attempt itself, the same way a 4th violation auto-submits, with no
 // tap needed and no chance to keep answering past time.
-function tmsPaintResumeCard(slot){
+function tmsPaintResumeCard(slot, onChange){
   const paint = items => {
     if(!slot.isConnected) return;
     slot.innerHTML = '';
@@ -2941,8 +3226,9 @@ function tmsPaintResumeCard(slot){
       });
       slot.appendChild(card);
     });
+    if(onChange) onChange(items);   // lets the Dashboard's "What's Next" know whether this card is showing anything
   };
-  tmsLoadUnfinished(false).then(paint).catch(e => console.error('[test-engine] unfinished lookup failed:', e));
+  tmsLoadUnfinished(false).then(paint).catch(e => { console.error('[test-engine] unfinished lookup failed:', e); if(onChange) onChange([]); });
 }
 
 // Runs once per page load after sign-in. Only a genuine RELOAD of an active test goes straight back
@@ -3689,15 +3975,19 @@ function renderAnnouncementsTab(container){
   container.appendChild(listBox);
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
+    let lastItems = [];
     const unsub = listenContentByBatchIds(COL.announcements, ids, {field:'active', value:true}, items=>{
       items.sort((a,b)=>{
         const at = (a.createdAt && a.createdAt.toDate) ? a.createdAt.toDate().getTime() : 0;
         const bt = (b.createdAt && b.createdAt.toDate) ? b.createdAt.toDate().getTime() : 0;
         return bt - at; // newest first
       });
+      lastItems = items;
       renderAnnouncementsList(listBox, items);
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
     trackUnsub(unsub);
+    // "Got it" repaints just this list from the items already loaded — no re-render of the whole screen, no re-read.
+    trackUnsub(annReadSubscribe(()=> renderAnnouncementsList(listBox, lastItems)));
   });
 }
 
@@ -3707,7 +3997,7 @@ function renderAnnouncementsList(box, items){
   const readIds = new Set((CURRENT_PROFILE && CURRENT_PROFILE.readAnnouncementIds) || []);
   items.forEach(a=>{
     const isUnread = !readIds.has(a.id);
-    const card = el(`<div class="item-card" style="cursor:pointer">
+    const card = el(`<div class="item-card">
       <div class="item-top"><div class="item-icon">📢</div><div class="item-info">
         <div class="item-title">${esc(a.title)}</div>
         <div class="item-meta" style="white-space:pre-wrap">${esc(a.message)}</div>
@@ -3716,22 +4006,32 @@ function renderAnnouncementsList(box, items){
           <span class="badge badge-muted">${esc(a.batchName||'')}</span>
           <span class="badge badge-muted">${fmtDate(a.createdAt)}</span>
         </div>
+        ${isUnread ? '<button class="btn btn-primary" type="button" data-got style="width:auto;padding:8px 16px;font-size:13px;margin-top:10px">Got it ✓</button>' : ''}
       </div></div>
     </div>`);
-    if(isUnread) card.addEventListener('click', ()=> markAnnouncementRead(a.id), {once:true});
+    // Only this explicit button marks an announcement read — rendering or opening the page never does.
+    if(isUnread){
+      const gotBtn = $('[data-got]', card);
+      gotBtn.addEventListener('click', ()=>{ gotBtn.disabled = true; markAnnouncementRead(a.id); });
+    }
     box.appendChild(card);
   });
 }
 
 function markAnnouncementRead(id){
-  if(!CURRENT_USER) return;
-  if(CURRENT_PROFILE){
-    CURRENT_PROFILE.readAnnouncementIds = Array.from(new Set([...(CURRENT_PROFILE.readAnnouncementIds||[]), id]));
-  }
+  if(!CURRENT_USER || !CURRENT_PROFILE || !id) return;
+  const cur = CURRENT_PROFILE.readAnnouncementIds || [];
+  if(cur.includes(id)) return;                       // already read — never write twice
+  CURRENT_PROFILE.readAnnouncementIds = cur.concat([id]);
+  annReadEmit();                                     // instant local UI update (Announcements list + Dashboard), no screen re-render
   db.collection(COL.students).doc(CURRENT_USER.uid).update({
-    readAnnouncementIds: firebase.firestore.FieldValue.arrayUnion(id)
-  }).catch(e=> console.error('[announcements] could not mark read (non-blocking):', e));
-  renderScreen();
+    readAnnouncementIds: firebase.firestore.FieldValue.arrayUnion(id)   // existing read-state field, existing self-update rule
+  }).catch(e=>{
+    console.error('[announcements] could not mark read:', e);
+    if(CURRENT_PROFILE) CURRENT_PROFILE.readAnnouncementIds = (CURRENT_PROFILE.readAnnouncementIds||[]).filter(x=> x !== id);
+    annReadEmit();
+    toast('Could not save — try again');
+  });
 }
 
 function renderProfileTab(container){
