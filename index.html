@@ -75,6 +75,13 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 body{min-height:100vh;font-size:16px;line-height:1.5}
 button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 button{cursor:pointer;appearance:none;-webkit-appearance:none;background-image:none;box-shadow:none;line-height:1.2}
+/* App-like mobile UX (Part I): buttons, nav, tab chips, toolbars and action rows are pure
+   controls with no prose worth copying, so a long-press there should never pop a text-selection
+   handle. Deliberately scoped — normal readable content (question text, notes/announcement
+   bodies, explanations) is untouched and stays selectable, same as plain text anywhere else. */
+button,.bottom-nav,.tab-filter,.filter-toolbar,.item-actions,.tap-card,.batch-card{
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+}
 svg{vertical-align:middle;flex-shrink:0}
 a{color:var(--accent)}
 img{max-width:100%}
@@ -252,6 +259,22 @@ mjx-container{color:var(--text) !important}
 .search-input-wrap input::placeholder{color:var(--text-dim)}
 .search-input-wrap .si{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text-dim);display:flex}
 .search-input-wrap .si svg{width:15px;height:15px}
+/* Part L — Admin -> Tests -> Published Tests filter row, compacted. Scoped to .pt-filters
+   only (see renderPublishedTestsSection), so every other search/select in the app (Notes,
+   Announcements, Results tab, etc.) is unaffected. */
+.pt-filters{margin-bottom:2px}
+.pt-filters .search-input-wrap{margin-bottom:8px}
+.pt-filters .search-input-wrap input{padding:8px 12px 8px 30px;font-size:13px}
+.pt-filters .search-input-wrap .si svg{width:13px;height:13px}
+.pt-filters select{padding:7px 9px;font-size:12.5px}
+.pt-filters .filter-toolbar{margin-bottom:4px}
+/* Part M — Admin -> Tests -> Create Test -> Manual Builder -> "Test details" card only
+   (see drawManualBuilder). The Questions card below is untouched, and .field/.row2
+   elsewhere in the app (Profile, Edit Test, video/class/note forms) are untouched. */
+.compact-fields .field{margin-bottom:8px}
+.compact-fields .field label{font-size:11.5px;margin-bottom:3px}
+.compact-fields .field input,.compact-fields .field select,.compact-fields .field textarea{padding:7px 10px;font-size:13px}
+.compact-fields .row2{gap:8px}
 
 /* -------- hamburger + drawer -------- */
 .hamburger-btn{background:none;border:none;color:var(--text);padding:9px;min-width:40px;min-height:40px;
@@ -1893,7 +1916,7 @@ function renderBatchSelector(container, activeEnrollments){
   activeEnrollments.forEach(e=>{
     select.appendChild(el(`<option value="${esc(e.batchId)}">${esc(e.batchName||e.batchId)}</option>`));
   });
-  select.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">Free Demo — All Students</option>`));
+  select.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">Free Demo</option>`));
   select.value = STUDENT_SELECTED_BATCH_ID;
   select.addEventListener('change', ()=>{
     STUDENT_SELECTED_BATCH_ID = select.value;
@@ -2496,7 +2519,7 @@ function renderVideoList(box, items){
   if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">🎬</div>No recorded classes yet.</div>`)); return; }
   items.forEach(v=>{
     const card = el(`
-      <div class="item-card">
+      <div class="item-card tap-card">
         <div class="item-top">
           <div class="item-icon">▶️</div>
           <div class="item-info">
@@ -2665,7 +2688,7 @@ function uniqueBatchesFromTests(tests){
   const map = new Map();
   (tests||[]).forEach(t=>{
     if(!t.batchId) return;
-    const name = t.batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : (t.batchName || t.batch || t.batchId);
+    const name = t.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (t.batchName || t.batch || t.batchId);
     if(!map.has(t.batchId)) map.set(t.batchId, name);
   });
   return Array.from(map.entries()).map(([id,name])=>({id,name})).sort((a,b)=> a.name.localeCompare(b.name));
@@ -3804,7 +3827,7 @@ function renderTestList(box, tests, ctx, opts){
       if(r) badges += `<span class="badge badge-muted">${esc(r.score)}/${esc(r.total)}</span>`;
     }
     const card = el(`
-      <div class="item-card">
+      <div class="item-card tap-card">
         <div class="item-top">
           <div class="item-icon">${km.icon}</div>
           <div class="item-info">
@@ -3889,7 +3912,7 @@ function renderNotesList(box, items){
   if(!items.length){ box.appendChild(el(`<div class="empty-state"><div class="icon">📄</div>No files here yet.</div>`)); return; }
   items.forEach(n=>{
     const card = el(`
-      <div class="item-card">
+      <div class="item-card tap-card">
         <div class="item-top">
           <div class="item-icon">${n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div>
           <div class="item-info">
@@ -3936,7 +3959,7 @@ function driveIdFromUrl(url){
    above) rather than a live listener — the dropdown doesn't need to be
    real-time. */
 function loadActiveBatchesInto(selectEl){
-  selectEl.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">🎁 Free Demo — All Students</option>`));
+  selectEl.appendChild(el(`<option value="${esc(GENERAL_BATCH_ID)}">🎁 Free Demo</option>`));
   return db.collection(COL.batches).where('status','==','active').get().then(snap=>{
     const batches = []; snap.forEach(d=> batches.push({id:d.id, name:d.data().name||'(unnamed batch)'}));
     batches.sort((a,b)=> a.name.localeCompare(b.name));
@@ -4059,7 +4082,7 @@ function renderProfileTab(container){
       <div class="field"><label>Class</label><input id="pfClass" type="text" value="${esc(p.class||'')}" disabled></div>
       <div class="field">
         <label>🔒 Batch</label>
-        <input type="text" value="${esc(p.batch||'—')}" disabled style="opacity:.6;cursor:not-allowed">
+        <input id="pfBatchDisplay" type="text" value="Loading…" disabled style="opacity:.6;cursor:not-allowed">
         <div class="hint">Set by your teacher via batch enrollment — can't be changed here.</div>
       </div>
       <div class="field"><label>School</label><input id="pfSchool" type="text" value="${esc(p.school||'')}" disabled></div>
@@ -4116,6 +4139,21 @@ function renderProfileTab(container){
       btn.disabled = false; btn.textContent = '💾 Save Changes';
       showErr('Could not save — check your connection and try again.');
     }
+  });
+  // Batch field (Part H fix): p.batch is a legacy field the app stopped writing once batch
+  // access moved to enrollments (Phase F.5) — it's almost always empty, which is the actual
+  // bug ("—" shown despite a real assignment). The Dashboard already resolves the student's
+  // real batch(es) from the SAME source (active enrollments); reuse that here rather than
+  // inventing a second source of truth. One-time read (not a listener) — this is a locked
+  // display-only field, so it doesn't need to track live admin changes second-to-second.
+  db.collection(COL.enrollments).where('studentId','==',CURRENT_USER.uid).get().then(snap=>{
+    const names = []; snap.forEach(d=>{ const e = d.data(); if(e.status==='active') names.push(e.batchName || 'Batch'); });
+    const el2 = $('#pfBatchDisplay', container);
+    if(el2) el2.value = names.length ? names.join(', ') : 'Free Demo';
+  }).catch(e=>{
+    console.error('[profile] could not load batch:', e);
+    const el2 = $('#pfBatchDisplay', container);
+    if(el2) el2.value = p.batch || 'Free Demo';
   });
   container.appendChild(el(`
     <div class="card" id="notifCard">
@@ -4471,6 +4509,29 @@ function tmsPlayerMain(){
     var mmss = String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0');
     return hh>0 ? (hh+':'+mmss) : mmss;
   }
+  // Part N — suggest a descriptive filename for "Save as PDF" by setting document.title right
+  // before printing (TITLE/SUBJECT are this same script's own top-level consts; BOOT.review is
+  // only present in review mode, which is the only mode this button is ever shown in). Browsers
+  // that offer "Save as PDF" from the print dialog default the suggested filename to
+  // document.title, so this is the only lever available without a PDF library — the browser/OS
+  // still has the final say, and some ignore it entirely.
+  function pdfNamePart(s){
+    s = String(s||'').trim();
+    if(!s) return '';
+    // Any run of characters that aren't letters/digits — spaces, hyphens, punctuation,
+    // anything invalid in a filename — collapses to a single underscore, e.g.
+    // "Full Test - 01" -> "Full_Test_01" (matches the required filename example exactly).
+    s = s.replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+    return s;
+  }
+  function pdfSuggestedTitle(){
+    // No literal ".pdf" in the title: Chrome's Save-as-PDF appends ".pdf" to whatever
+    // document.title already is, so a title ending in ".pdf" would come out "...pdf.pdf"
+    // there — the browser adding the extension already gets the filename the spec asks for.
+    var parts = [pdfNamePart(SUBJECT), pdfNamePart(TITLE), pdfNamePart(BOOT.review && BOOT.review.studentName)].filter(Boolean);
+    parts.push('AtomicMinds');
+    return parts.join('_');
+  }
   // Native print only (no library, no server round-trip) — the button just opens the browser/OS
   // print dialog; whether "Save as PDF" is offered there is entirely up to the device, so this
   // never claims a PDF was produced, only that printing was attempted.
@@ -4480,6 +4541,20 @@ function tmsPlayerMain(){
         flash('Printing isn\u2019t supported in this browser. Open this review in a supported browser and use its Print / Save as PDF option.');
         return;
       }
+      var originalTitle = document.title;
+      var suggested = pdfSuggestedTitle();
+      var restored = false;
+      function restoreTitle(){
+        if(restored) return; restored = true;
+        document.title = originalTitle;
+        window.removeEventListener('afterprint', restoreTitle);
+      }
+      if(suggested) document.title = suggested;
+      // 'afterprint' fires once the print/Save-as-PDF dialog is dismissed on every desktop
+      // browser and modern mobile Chrome; some mobile browsers never fire it at all, so a
+      // timeout restores the title regardless (best-effort — see requirement 5's own caveat).
+      window.addEventListener('afterprint', restoreTitle);
+      setTimeout(restoreTitle, 4000);
       window.print();
     }catch(e){
       flash('Couldn\u2019t open the print dialog. Open this review in a supported browser and use its Print / Save as PDF option.');
@@ -5275,7 +5350,7 @@ function renderAdminStudents(container){
       const initials = (s.fullName||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
       const n = batchCounts[s.id]||0;
       const card = el(`
-        <div class="item-card">
+        <div class="item-card tap-card">
           <div class="item-top">
             <div class="item-icon">${esc(initials)}</div>
             <div class="item-info">
@@ -5639,7 +5714,7 @@ function drawRecordedForm(body){
     const batchId = batchSel.value;
     if(!url || !title){ toast('Fill link and title'); return; }
     if(!batchId){ toast('Select a batch'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.videos).add({
       ytId: ytIdFromUrl(url), title,
       subject: $('#vSubject',body).value.trim(), batchId, batchName,
@@ -5704,7 +5779,7 @@ function drawLiveForm(body){
     const batchId = batchSel.value;
     if(!url || !title){ toast('Fill link and title'); return; }
     if(!batchId){ toast('Select a batch'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.liveClasses).add({
       meetLink: url, title, subject: $('#lSubject',body).value.trim(), batchId, batchName,
       date: $('#lDate',body).value, time: $('#lTime',body).value,
@@ -5847,16 +5922,22 @@ function drawCreateTestSection(container, opts){
    already-loaded `tests` array (getTests()) — no new Firestore query on every keystroke. ---------- */
 function renderPublishedTestsSection(container, getTests, opts){
   opts = opts || {};
+  // Part L: this filter block is visually oversized on Admin -> Tests -> Published Tests.
+  // Scoped to .pt-filters (this function only) rather than touching .search-input-wrap /
+  // select globally, so Notes/Announcements/Results and every other search bar in the app
+  // keep their existing size untouched.
+  const filterWrap = el(`<div class="pt-filters"></div>`);
+  container.appendChild(filterWrap);
   const searchWrap = el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" id="ptSearch" placeholder="Search tests by title..."></div>`);
-  container.appendChild(searchWrap);
+  filterWrap.appendChild(searchWrap);
 
-  const selRow = el(`<div class="row2" style="margin-bottom:10px">
+  const selRow = el(`<div class="row2" style="margin-bottom:8px">
     <select id="ptBatch"><option value="">All Batches</option></select>
     <select id="ptSubject"><option value="">All Subjects</option></select>
   </div>`);
-  container.appendChild(selRow);
+  filterWrap.appendChild(selRow);
 
-  const selRow2 = el(`<div class="row2" style="margin-bottom:10px">
+  const selRow2 = el(`<div class="row2" style="margin-bottom:8px">
     <select id="ptType">
       <option value="">All Types</option>
       <option value="live">🔴 Live</option>
@@ -5869,10 +5950,10 @@ function renderPublishedTestsSection(container, getTests, opts){
       <option value="title">Title A–Z</option>
     </select>
   </div>`);
-  container.appendChild(selRow2);
+  filterWrap.appendChild(selRow2);
 
   const toolbar = el(`<div class="filter-toolbar"><div class="count" id="ptCount"></div><button class="btn-sm btn-ghost" type="button" id="ptClear">✕ Clear Filters</button></div>`);
-  container.appendChild(toolbar);
+  filterWrap.appendChild(toolbar);
 
   const listBox = el(`<div><div class="spinner"></div></div>`);
   container.appendChild(listBox);
@@ -5957,7 +6038,6 @@ function renderPublishedTestsSection(container, getTests, opts){
           ${Array.isArray(t.questions) && t.questions.length ? `
           <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
           <button class="btn-sm btn-ghost" data-act="dup">${icon('layers',15)}<span>Duplicate</span></button>` : ''}
-          <button class="btn-sm btn-ghost" data-act="results">${icon('chart',15)}<span>Results</span></button>
           <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
@@ -5970,7 +6050,6 @@ function renderPublishedTestsSection(container, getTests, opts){
         }
         else if(b.dataset.act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
         else if(b.dataset.act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
-        else { openTestResults(t); }
       }));
       listBox.appendChild(card);
     });
@@ -6051,7 +6130,7 @@ function drawResultsSection(container, getTests){
     }
     filtered.forEach(t=>{
       const km = TEST_KIND_META[testKind(t)];
-      const row = el(`<div class="item-card" style="cursor:pointer${selectedTestId===t.id?';border-color:var(--accent)':''}">
+      const row = el(`<div class="item-card tap-card" style="cursor:pointer${selectedTestId===t.id?';border-color:var(--accent)':''}">
         <div class="item-title" style="font-size:14px">${esc(t.title)}</div>
         <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?' · '+esc(t.batchName||t.batch):''} · ${km.icon} ${km.label}</div>
       </div>`);
@@ -6069,7 +6148,7 @@ function drawResultsSection(container, getTests){
 
   async function selectTest(t){
     pane.innerHTML = '';
-    const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : (t.batchName || t.batch || '');
+    const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (t.batchName || t.batch || '');
     pane.appendChild(el(`<div class="card-title" style="margin-top:8px">📄 ${esc(t.title)}</div>`));
     if(batchLbl) pane.appendChild(el(`<div class="item-meta" style="margin:-6px 0 10px">${esc(batchLbl)}</div>`));
 
@@ -6353,7 +6432,7 @@ function renderTestResultGroups(box, t, groups, opts){
    `groups` is exactly the data the Student Results view already loaded for this one test. */
 function renderTestAnalytics(box, t, groups){
   const a = computeTestAnalytics(t, groups);
-  const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : (t.batchName || t.batch || '—');
+  const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (t.batchName || t.batch || '—');
   const stat = (label, value) => `<div class="stat-tile"><div class="stat-val">${esc(String(value))}</div><div class="stat-lbl">${esc(label)}</div></div>`;
 
   let html = `<div class="item-meta" style="margin-bottom:10px">Batch: <b>${esc(batchLbl)}</b></div><div class="stat-grid">`;
@@ -6402,7 +6481,7 @@ function renderTestAnalytics(box, t, groups){
 }
 
 function openTestResults(t){
-  const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : (t.batchName || t.batch || '');
+  const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (t.batchName || t.batch || '');
   const overlay = el(`<div class="overlay open"><div class="sheet">
     <div class="sheet-handle"></div><button class="sheet-close" id="closeRes">✕</button><div style="clear:both"></div>
     <div class="card-title">📊 ${esc(t.title)} — results</div>
@@ -6426,7 +6505,7 @@ function openTestResults(t){
 function drawManualBuilder(body, onPublished){
   let questions = [];
   body.appendChild(el(`<div>
-    <div class="card">
+    <div class="card compact-fields">
       <div class="card-title">📋 Test details</div>
       <div class="field"><label>Title</label><input id="mTitle" placeholder="Full Test - 01"></div>
       <div class="row2">
@@ -6552,7 +6631,7 @@ function drawManualBuilder(body, onPublished){
       correctMarkRaw: $('#mCorrect',body).value, wrongMarkRaw: $('#mWrong',body).value, durationRaw: $('#mDuration',body).value,
       liveStartRaw: $('#mLiveStart',body).value, liveEndRaw: $('#mLiveEnd',body).value });
     if(!await confirmDraftIssues(v, 'Publish anyway')) return;
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     const answerButtonLayout = $('#mLayout',body).value;
     const meta = {
       title, subject,
@@ -6939,7 +7018,7 @@ function openEditTestSheet(t, opts){
         correctMarkRaw: $('#eCorrect',overlay).value, wrongMarkRaw: $('#eWrong',overlay).value, durationRaw: $('#eDuration',overlay).value,
         liveStartRaw: $('#eLiveStart',overlay).value, liveEndRaw: $('#eLiveEnd',overlay).value });
       if(!await confirmDraftIssues(v, dup ? 'Create anyway' : 'Save anyway')) return;
-      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
       const answerButtonLayout = $('#eLayout',overlay).value;
       const meta = {
         title, subject,
@@ -7094,7 +7173,7 @@ function drawTextGenerator(body, onPublished){
     const marks = correctMark(), neg = Math.abs(parseFloat($('#tgNeg',body).value) || 0);
     const live = readLiveSchedule(type, $('#tgLiveStart',body).value, $('#tgLiveEnd',body).value);
     if(live.error){ toast(live.error); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     const meta = { title, subject, correctMark: marks, wrongMark: -neg, duration: Math.max(0, parseInt($('#tgDuration',body).value) || 0), answerButtonLayout: $('#tgLayout',body).value };
     if(!await publishNormalizedTest({ title, subject, batchId, batchName, type, meta, questions: r.questions, live, source:'text' })) return;
     $('#tgTitle',body).value=''; $('#tgText',body).value=''; $('#tgResult',body).innerHTML=''; batchSel.value='';
@@ -7127,7 +7206,7 @@ function drawPasteForm(body){
     const batchId = batchSel.value;
     if(!title || !html){ toast('Fill title and paste HTML'); return; }
     if(!batchId){ toast('Select a batch'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     await db.collection(COL.tests).add({
       title, subject: $('#pSubject',body).value.trim(), batchId, batchName,
       type: $('#pType',body).value, htmlContent: html, source: 'pasted',
@@ -7169,7 +7248,7 @@ function renderAdminNotes(container){
     const batchId = batchSel.value;
     if(!title || !link){ toast('Fill title and paste a Drive link'); return; }
     if(!batchId){ toast('Select a batch'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     const driveId = driveIdFromUrl(link);
     if(!driveId){ toast('Could not read a file ID from that link'); return; }
     const btn = $('#uploadNote',container); btn.disabled = true; btn.textContent = 'Saving…';
@@ -7265,7 +7344,7 @@ function renderAdminAnnouncements(container){
     const batchId = batchSel.value;
     if(!title || !message){ toast('Fill in title and message'); return; }
     if(!batchId){ toast('Select an audience'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     const btn = $('#saveAnnouncement',container); btn.disabled = true;
     try{
       if(editingId){
@@ -7582,7 +7661,7 @@ function renderAdminCalendar(container){
       if(!startTime || !endTime){ toast('Enter start and end time'); return; }
       if(endTime <= startTime){ toast('End time must be after start time'); return; }
       if(!title){ toast('Enter a title'); return; }
-      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+      const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
       btn.disabled = true;
       try{
         if(editingRuleId){
@@ -7625,7 +7704,7 @@ function renderAdminCalendar(container){
     if(!startTime || !endTime){ toast('Enter start and end time'); return; }
     if(endTime <= startTime){ toast('End time must be after start time'); return; }
     if(!title){ toast('Enter a title'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo — All Students' : batchSel.selectedOptions[0].textContent;
+    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
     btn.disabled = true;
     try{
       if(editingId){
