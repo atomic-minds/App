@@ -355,6 +355,12 @@ mjx-container{color:var(--text) !important}
 .enroll-info{flex:1;min-width:0}
 .enroll-name{font-size:14px;font-weight:600}
 .enroll-meta{font-size:12.5px;color:var(--text-dim);margin-top:2px}
+/* Enrolled batches (Student Details) / Enrolled students (Batch Details): info left and actions right when the
+   width allows, otherwise the actions wrap cleanly underneath instead of squeezing the name into a one-word
+   column. Opt-in via .enroll-wrap, so the other .enroll-row lists (search results etc.) are unchanged. */
+.enroll-row.enroll-wrap{flex-wrap:wrap;row-gap:8px;padding:11px 0}
+.enroll-row.enroll-wrap .enroll-info{flex:1 1 140px}
+.enroll-row.enroll-wrap .item-actions{margin-top:0;flex:0 0 auto}
 .badge-suspended{background:var(--warning-bg);color:var(--warning)}
 .badge-expired{background:var(--danger-bg);color:var(--danger)}
 
@@ -1445,8 +1451,10 @@ function homeUnreadAnnouncements(){
   return (HOME.ann || []).filter(a=> !read.has(a.id))
     .sort((a,b)=> (tsToMs(b.createdAt)||0) - (tsToMs(a.createdAt)||0));
 }
-// Last recorded class opened on THIS device (localStorage only), keyed per student so a shared device never leaks.
-function learnKey(uid){ return 'tms:lastLearning:' + uid; }
+// Last recorded class opened on THIS device (localStorage only), keyed per student AND per batch:
+// a student in several batches keeps one independent "Continue Learning" item for each, and the
+// Dashboard only ever reads the slot of the batch currently selected (view scope, never authorization).
+function learnKey(uid, batchId){ return 'tms:lastLearning:' + uid + ':' + batchId; }
 
 let NOTIF_GEN = 0;   // bumped on every start/stop, so a slow batch-id lookup that resolves after a logout can't attach listeners for a signed-out session
 function startAnnouncementNotifications(){
@@ -1773,35 +1781,51 @@ function renderDashWhatsNext(container){
 
 function renderDashContinueLearning(container){
   if(!CURRENT_USER) return;
-  const item = tmsLsGet(learnKey(CURRENT_USER.uid));
-  if(!item || item.type !== 'recordedClass' || !item.id || !item.title) return;   // nothing valid -> render nothing at all
-  const wrap = el(`<div>
-    <div class="card-title" style="margin:4px 2px 8px">▶ Continue Learning</div>
-    <div class="card">
-      <div style="font-size:15px;font-weight:700">${esc(item.title)}</div>
-      ${item.subject?`<div style="font-size:12.5px;color:var(--text-dim);margin-top:2px">${esc(item.subject)}</div>`:''}
-      <button class="btn btn-primary" type="button" style="margin-top:12px">Continue →</button>
-    </div>
-  </div>`);
-  const btn = $('button', wrap);
-  function gone(){ tmsLsDel(learnKey(CURRENT_USER.uid)); wrap.remove(); toast('That class is no longer available'); }
-  btn.addEventListener('click', async ()=>{
-    btn.disabled = true;
-    try{
-      // The card itself is local-only (zero reads). Opening fetches the ONE video document, so
-      // firestore.rules — not this stored pointer — decide whether the student may still watch it.
-      const snap = await db.collection(COL.videos).doc(item.id).get();
-      if(!snap.exists){ gone(); return; }
-      openVideoPlayer({ id:snap.id, ...snap.data() });
-      btn.disabled = false;
-    }catch(err){
-      if(err && err.code === 'permission-denied'){ gone(); return; }
-      console.error('[continue-learning] could not open:', err);
-      toast('Could not open — check your connection');
-      btn.disabled = false;
-    }
-  });
-  container.appendChild(wrap);
+  // Stable slot so the section can repaint in place (keeps its position between "What's Next" and the
+  // banner). Repaints ride the same in-memory homeEmit() the batch selector and the enrollments
+  // listener already fire — no new Firestore listener, no extra reads.
+  const slot = el(`<div></div>`);
+  container.appendChild(slot);
+  let shownKey = null;
+  function paint(){
+    const batchId = STUDENT_SELECTED_BATCH_ID;          // view scope only; null until enrollments resolve -> show nothing yet
+    const item = batchId ? tmsLsGet(learnKey(CURRENT_USER.uid, batchId)) : null;
+    const valid = !!(item && item.type === 'recordedClass' && item.id && item.title && item.batchId === batchId);
+    const key = valid ? (batchId + '|' + item.id) : '';
+    if(key === shownKey) return;                          // nothing relevant changed — don't rebuild the card
+    shownKey = key;
+    slot.innerHTML = '';
+    if(!valid) return;                                    // nothing valid for THIS batch -> render nothing at all
+    const wrap = el(`<div>
+      <div class="card-title" style="margin:4px 2px 8px">▶ Continue Learning</div>
+      <div class="card">
+        <div style="font-size:15px;font-weight:700">${esc(item.title)}</div>
+        ${item.subject?`<div style="font-size:12.5px;color:var(--text-dim);margin-top:2px">${esc(item.subject)}</div>`:''}
+        <button class="btn btn-primary" type="button" style="margin-top:12px">Continue →</button>
+      </div>
+    </div>`);
+    const btn = $('button', wrap);
+    function gone(){ tmsLsDel(learnKey(CURRENT_USER.uid, batchId)); paint(); toast('That class is no longer available'); }
+    btn.addEventListener('click', async ()=>{
+      btn.disabled = true;
+      try{
+        // The card itself is local-only (zero reads). Opening fetches the ONE video document, so
+        // firestore.rules — not this stored pointer — decide whether the student may still watch it.
+        const snap = await db.collection(COL.videos).doc(item.id).get();
+        if(!snap.exists){ gone(); return; }
+        openVideoPlayer({ id:snap.id, ...snap.data() });
+        btn.disabled = false;
+      }catch(err){
+        if(err && err.code === 'permission-denied'){ gone(); return; }
+        console.error('[continue-learning] could not open:', err);
+        toast('Could not open — check your connection');
+        btn.disabled = false;
+      }
+    });
+    slot.appendChild(wrap);
+  }
+  trackUnsub(homeSubscribe(paint));
+  paint();
 }
 
 /* Google Drive "share" links (drive.google.com/file/d/ID/view) are an
@@ -2565,8 +2589,12 @@ function renderLiveList(box, items){
 
 function openVideoPlayer(v){
   // "Continue Learning" pointer — device-local only (no Firestore write, no progress/percentage, no watch tracking).
-  if(CURRENT_USER && v && v.id){
-    tmsLsSet(learnKey(CURRENT_USER.uid), { type:'recordedClass', id:v.id, title:v.title||'', subject:v.subject||'', savedAt:Date.now() });
+  // Saved under the currently selected batch, so activity in one batch never overwrites another's item.
+  // (Selection not resolved yet -> fall back to the class's own batchId; neither known -> save nothing
+  // rather than store an item with no batch.)
+  const learnBatchId = STUDENT_SELECTED_BATCH_ID || (v && v.batchId);
+  if(CURRENT_USER && v && v.id && learnBatchId){
+    tmsLsSet(learnKey(CURRENT_USER.uid, learnBatchId), { type:'recordedClass', batchId:learnBatchId, id:v.id, title:v.title||'', subject:v.subject||'', savedAt:Date.now() });
   }
   const overlay = el(`
     <div class="overlay open">
@@ -5297,13 +5325,13 @@ function openBatchDetail(batch){
     for(const e of items){
       let sName = e.studentName || 'Student';
       try{ const sDoc = await db.collection(COL.students).doc(e.studentId).get(); if(sDoc.exists) sName = sDoc.data().fullName; }catch(err){}
-      const expTxt = e.expiryType==='lifetime' ? '♾ Lifetime' : ('Expires ' + fmtDate(e.expiresAt));
-      const statusBadge = e.status==='active' ? '<span class="badge badge-free">Active</span>'
-        : e.status==='suspended' ? '<span class="badge badge-suspended">Suspended</span>'
-        : '<span class="badge badge-expired">Expired</span>';
-      const row = el(`<div class="enroll-row">
-        <div class="enroll-info"><div class="enroll-name">${esc(sName)}</div><div class="enroll-meta">${esc(expTxt)}</div></div>
-        <div class="item-badges">${statusBadge}</div>
+      // The batch page is already scoped to one batch: no per-student validity, and no "Active" badge on
+      // every row — only an exceptional state (Suspended / Expired) is flagged, next to the name.
+      const statusBadge = e.status==='active' ? ''
+        : e.status==='suspended' ? '<span class="badge badge-suspended" style="margin-left:6px;vertical-align:middle">Suspended</span>'
+        : '<span class="badge badge-expired" style="margin-left:6px;vertical-align:middle">Expired</span>';
+      const row = el(`<div class="enroll-row enroll-wrap">
+        <div class="enroll-info"><div class="enroll-name">${esc(sName)}${statusBadge}</div></div>
       </div>`);
       const actions = el(`<div class="item-actions">
         <button class="btn-sm btn-ghost" data-act="toggle">${icon(e.status==='active'?'pause':'play',15)}<span>${e.status==='active'?'Suspend':'Reactivate'}</span></button>
@@ -5585,13 +5613,14 @@ function openStudentDetail(s){
     enrollListBox.innerHTML = '';
     if(!items.length){ enrollListBox.appendChild(el(`<div class="empty-state" style="padding:14px 0">No batches assigned yet.</div>`)); return; }
     items.forEach(e=>{
-      const expTxt = e.expiryType==='lifetime' ? '♾ Lifetime' : ('Expires ' + fmtDate(e.expiresAt));
-      const statusBadge = e.status==='active' ? '<span class="badge badge-free">Active</span>'
-        : e.status==='suspended' ? '<span class="badge badge-suspended">Suspended</span>'
-        : '<span class="badge badge-expired">Expired</span>';
-      const row = el(`<div class="enroll-row">
-        <div class="enroll-info"><div class="enroll-name">${esc(e.batchName||'Batch')}</div><div class="enroll-meta">${esc(expTxt)}</div></div>
-        <div class="item-badges">${statusBadge}</div>
+      const expTxt = e.expiryType==='lifetime' ? 'Lifetime' : ('Expires ' + fmtDate(e.expiresAt));
+      // "Active" is the normal state and the Suspend/Reactivate button already says which it is, so only an
+      // exceptional state (Suspended / Expired) gets a badge.
+      const statusBadge = e.status==='active' ? ''
+        : e.status==='suspended' ? '<span class="badge badge-suspended" style="margin-left:6px;vertical-align:middle">Suspended</span>'
+        : '<span class="badge badge-expired" style="margin-left:6px;vertical-align:middle">Expired</span>';
+      const row = el(`<div class="enroll-row enroll-wrap">
+        <div class="enroll-info"><div class="enroll-name">${esc(e.batchName||'Batch')}${statusBadge}</div><div class="enroll-meta">${esc(expTxt)}</div></div>
       </div>`);
       const actions = el(`<div class="item-actions">
         <button class="btn-sm btn-ghost" data-act="toggle">${icon(e.status==='active'?'pause':'play',15)}<span>${e.status==='active'?'Suspend':'Reactivate'}</span></button>
