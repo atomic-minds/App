@@ -911,7 +911,7 @@ function renderAuthScreen(){
     card.appendChild(el(`<div class="auth-link">Free accounts can see demo &amp; free classes and tests right away.</div>`));
   }
 
-  wrap.appendChild(el(`<div class="admin-link" id="adminLinkBtn">Admin login</div>`));
+  wrap.appendChild(el(`<div class="admin-link" id="adminLinkBtn">© 2026 Atomic Minds. All rights reserved.</div>`));
   wrap.querySelector('#adminLinkBtn').addEventListener('click', ()=>{
     STATE.screen = 'adminLogin';
     renderScreen();
@@ -3611,7 +3611,7 @@ function openTestHub(t, ctx){
         ? hist.map(r => histRow({ label:'Practice', ms:r.submittedAtMs, score:r.score, total:r.total, correct:r.correct, wrong:r.wrong, skipped:r.skipped, rv:r.id })).join('')
         : `<div class="empty-state" style="padding:14px 0">No practice attempts yet.</div>`;
       html += `<button class="btn btn-primary" id="hubStart" style="margin-top:14px">Start Practice</button>
-               <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">Unlimited attempts. Practice results stay in this browser only and are not shared with your teacher.</div>`;
+               <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">Unlimited attempts. No time limits.</div>`;
     } else {
       const done = list.filter(a => a.status === 'completed');
       inprog = list.find(a => a.status === 'in-progress');
@@ -3761,7 +3761,11 @@ function renderTestsTab(container){
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
     const unsub = listenContentByBatchIds(COL.tests, selectedContentIds(ids), null, items=>{
-      allTests = items;
+      // Test Activate/Deactivate: missing field == active (backward compatible with every
+      // published test that predates this feature); explicit false == hidden, same as
+      // announcements/banners. The rules' own `list` gate already enforces this server-side —
+      // this is a defensive second layer, not a new read.
+      allTests = items.filter(t => t.active !== false);
       applyFilter();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
     trackUnsub(unsub);
@@ -6032,12 +6036,13 @@ function renderPublishedTestsSection(container, getTests, opts){
           <div class="item-title">${esc(t.title)}</div>
           <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?(' · '+esc(t.batchName||t.batch)):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}${t.duration?(' · '+t.duration+' min'):''}</div>
           ${created ? `<div class="item-meta">Created ${esc(fmtDate(created))}</div>` : ''}
-          <div class="item-badges"><span class="badge badge-accent">${km.icon} ${km.label}</span>${liveStatusBadge(t)}</div>
+          <div class="item-badges"><span class="badge badge-accent">${km.icon} ${km.label}</span>${liveStatusBadge(t)}<span class="badge ${t.active===false?'badge-muted':'badge-free'}">${t.active===false?'Inactive':'Active'}</span></div>
         </div></div>
         <div class="item-actions">
           ${Array.isArray(t.questions) && t.questions.length ? `
           <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
           <button class="btn-sm btn-ghost" data-act="dup">${icon('layers',15)}<span>Duplicate</span></button>` : ''}
+          <button class="btn-sm btn-ghost" data-act="toggle">${icon(t.active===false?'check':'ban',15)}<span>${t.active===false?'Activate':'Deactivate'}</span></button>
           <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
         </div>
       </div>`);
@@ -6050,6 +6055,15 @@ function renderPublishedTestsSection(container, getTests, opts){
         }
         else if(b.dataset.act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
         else if(b.dataset.act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
+        else if(b.dataset.act==='toggle'){
+          // Visibility switch only — identical in spirit to Announcement/Banner activation, and
+          // completely independent of Live Test scheduling (liveStartAt/liveEndAt untouched).
+          b.disabled = true;
+          try{
+            await db.collection(COL.tests).doc(t.id).update({ active: t.active===false, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+            toast(t.active===false ? 'Activated' : 'Deactivated');
+          }catch(e){ console.error(e); toast('Could not update — check your connection.'); b.disabled = false; }
+        }
       }));
       listBox.appendChild(card);
     });
