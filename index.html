@@ -351,6 +351,7 @@ mjx-container{color:var(--text) !important}
 .batch-menu-btn{width:36px;height:36px;padding:0;font-size:20px;line-height:1;font-weight:700;border-radius:8px;
   background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center}
 .batch-menu-btn:active{border-color:var(--accent)}
+.batch-menu-item.danger{color:var(--danger)}
 .batch-menu-item{display:flex;align-items:center;justify-content:flex-start;gap:10px;text-align:left;margin-bottom:6px}
 .mc-group-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13.5px;font-weight:700;margin:12px 0 4px}
 .mc-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-soft);cursor:pointer}
@@ -1823,7 +1824,7 @@ function renderDashContinueLearning(container){
         // The card itself is local-only (zero reads). Opening fetches the ONE video document, so
         // firestore.rules — not this stored pointer — decide whether the student may still watch it.
         const snap = await db.collection(COL.videos).doc(item.id).get();
-        if(!snap.exists){ gone(); return; }
+        if(!snap.exists || snap.data().active === false){ gone(); return; } // deactivated by the teacher → same as removed
         openVideoPlayer({ id:snap.id, ...snap.data() });
         btn.disabled = false;
       }catch(err){
@@ -2537,11 +2538,12 @@ function renderClassesTab(container){
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
     const scopedIds = selectedContentIds(ids); // Phase I: narrow to the Dashboard's currently selected batch (+ General)
     if(STATE.classesSubTab === 'recorded'){
-      const unsub = listenContentByBatchIds(COL.videos, scopedIds, null, items=> renderVideoList(listBox, items),
+      const unsub = listenContentByBatchIds(COL.videos, scopedIds, null, items=> renderVideoList(listBox, items.filter(contentActive)),
         ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
       trackUnsub(unsub);
     } else {
       const unsub = listenContentByBatchIds(COL.liveClasses, scopedIds, null, items=>{
+        items = items.filter(contentActive); // deactivated live classes are hidden from students
         items.sort((a,b)=> (a.status==='live'?0:1) - (b.status==='live'?0:1));
         renderLiveList(listBox, items);
       }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
@@ -3940,7 +3942,7 @@ function renderNotesTab(container){
   syncAndGetMyBatchIds().then(ids=>{
     if(!ids.length){ listBox.innerHTML = '<div class="empty-state">Your batch access isn\u2019t set up yet — ask your teacher.</div>'; return; }
     const unsub = listenContentByBatchIds(COL.notes, selectedContentIds(ids), null, items=>{
-      allNotes = items;
+      allNotes = items.filter(contentActive); // deactivated notes are hidden from students
       apply();
     }, ()=>{ listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
     trackUnsub(unsub);
@@ -5309,19 +5311,13 @@ function openBatchSheet(innerHtml){
 }
 
 function openBatchMenu(b){
-  const ov = el(`<div class="overlay open" style="align-items:center;z-index:1200"><div class="sheet" style="border-radius:16px;max-width:320px;padding:14px;transform:none">
-    <div style="font-size:14px;font-weight:700;margin:2px 4px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.name||'Batch')}</div>
-    <button type="button" class="btn btn-ghost batch-menu-item" data-a="edit">${icon('edit',16)}<span>Edit</span></button>
-    <button type="button" class="btn btn-ghost batch-menu-item" data-a="copy">${icon('copy',16)}<span>Copy Batch</span></button>
-    <button type="button" class="btn btn-ghost batch-menu-item" data-a="content">${icon('clipboard',16)}<span>Manage Content</span></button>
-  </div></div>`);
-  document.body.appendChild(ov);
-  ov.addEventListener('click', e=>{
-    if(e.target === ov){ ov.remove(); return; }
-    const btn = e.target.closest('[data-a]'); if(!btn) return;
-    ov.remove();
-    if(btn.dataset.a === 'edit') openEditBatchSheet(b);
-    else if(btn.dataset.a === 'copy') openCopyBatchSheet(b);
+  openActionMenu(b.name || 'Batch', [
+    { key:'edit', label:'Edit', icon:'edit' },
+    { key:'copy', label:'Copy Batch', icon:'copy' },
+    { key:'content', label:'Manage Content', icon:'clipboard' }
+  ], key=>{
+    if(key === 'edit') openEditBatchSheet(b);
+    else if(key === 'copy') openCopyBatchSheet(b);
     else openManageContentSheet(b.id);
   });
 }
@@ -5395,7 +5391,11 @@ function pickDefined(src, keys){ const o = {}; keys.forEach(k=>{ if(src[k] !== u
 function buildContentCopy(kind, src, dest){
   const base = { batchId: dest.id, batchName: dest.id === GENERAL_BATCH_ID ? 'Free Demo' : (dest.name || '') };
   const stamp = firebase.firestore.FieldValue.serverTimestamp();
-  if(kind !== 'tests') return Object.assign(pickDefined(src, CONTENT_COPY_FIELDS[kind]), base, { createdAt: stamp });
+  if(kind !== 'tests'){
+    const c = Object.assign(pickDefined(src, CONTENT_COPY_FIELDS[kind]), base, { createdAt: stamp });
+    if(src.active === false) c.active = false;   // a deactivated item stays deactivated in the copy
+    return c;
+  }
   const d = Object.assign(pickDefined(src, TEST_COPY_FIELDS), base, {
     questions: JSON.parse(JSON.stringify(src.questions)),   // deep copy of the definition only
     source: 'batch-copy', createdAt: stamp
@@ -5460,11 +5460,14 @@ function openManageContentSheet(presetSourceId){
   const ov = openBatchSheet(`<div class="card">
     <div class="card-title">${icon('clipboard',16)}<span>Manage Content</span></div>
     <div class="q-stat-preview">Copy selected classes, notes and tests from one batch to another. Each copy is independent — editing, deactivating or deleting one never changes the other. Students, enrollments, attempts and results are never copied.</div>
+    <div class="field"><label>Open this batch's content</label><div class="tab-filter" style="margin:0"><button type="button" data-go="classes">📹 Classes</button><button type="button" data-go="notes">📄 Notes</button><button type="button" data-go="tests">📋 Tests</button></div></div>
     <div class="field"><label>Source batch</label><select id="mcSrc">${all.map(b=> optHtml(b, presetSourceId)).join('')}</select></div>
     <div class="field"><label>Destination batch</label><select id="mcDst"><option value="">Select destination…</option>${all.filter(b=> b.status !== 'archived').map(b=> optHtml(b, '')).join('')}</select></div>
     <button class="btn btn-ghost" id="mcLoad">Load content</button>
   </div><div id="mcBody"></div>`);
   const body = $('#mcBody', ov), loadBtn = $('#mcLoad', ov);
+  // Shortcut into the SAME Published Classes / Notes / Tests screens, pre-filtered to the source batch.
+  $all('[data-go]', ov).forEach(btn=> btn.addEventListener('click', ()=>{ const id = $('#mcSrc', ov).value; ov.remove(); openAdminContent(btn.dataset.go, id); }));
   const nameOf = id => (all.find(b=> b.id === id) || {}).name || '';
 
   loadBtn.addEventListener('click', async ()=>{
@@ -6004,21 +6007,273 @@ function ytIdFromUrl(url){
   return m ? m[1] : (url||'').trim();
 }
 
+/* ================================================================
+   ADMIN — Published Classes / Published Notes (+ batch filter, shared with Published Tests)
+   ----------------------------------------------------------------
+   ONE implementation — renderPublishedContentSection() — drives Published Classes (recorded + live)
+   and Published Notes; each is described by a small config (VIDEO_CFG / LIVE_CFG / NOTE_CFG). Published
+   Tests keeps its own renderer and shares only the batch-filter helpers and the ⋮ menu below.
+   Batch filtering is by canonical batchId (never by the visible name), against the ONE snapshot each list
+   already had (no new listener, no extra reads). The selected batch (ADMIN_CONTENT_BATCH) is shared by
+   Published Classes / Notes / Tests so the batch context stays the same while moving between them, and
+   Batches → ⋮ → Manage Content can open any of them already filtered to that batch.
+   Deactivate/Activate reuses the Tests/Announcements idiom: an `active` field where a missing value means
+   active; students' lists hide `active === false` (see contentActive()). No rule or schema change.
+   Free Demo (batchId '__general__') is shown only under Free Demo / All Batches and carries a small
+   "all batches" label, because students of every batch see it.
+   ================================================================ */
+let ADMIN_CONTENT_BATCH = '';        // '' = All Batches; otherwise a canonical batchId
+let ADMIN_CLASS_KIND = 'recorded';   // Published Classes: 'recorded' | 'live'
+const ADMIN_BATCH_NAMES = new Map(); // batchId -> last seen display name (so a selected batch keeps its name even with no content)
+
+function openAdminContent(tab, batchId){ ADMIN_CONTENT_BATCH = batchId || ''; STATE.adminTab = tab; renderScreen(); }
+function contentActive(x){ return x.active !== false; }
+function sharedBadge(x){ return x.batchId === GENERAL_BATCH_ID ? '<span class="badge badge-accent">🎁 Free Demo · all batches</span>' : ''; }
+
+/* <option> list for a Batch filter: "All Batches" + every batch that has at least one of `items`
+   + the currently selected batch even if it has none (so selecting a batch never silently flips to All). */
+function batchFilterOptions(items, selectedId){
+  const list = uniqueBatchesFromTests(items);
+  list.forEach(b=> ADMIN_BATCH_NAMES.set(b.id, b.name));
+  ADMIN_BATCHES.forEach(b=> { if(!ADMIN_BATCH_NAMES.has(b.id)) ADMIN_BATCH_NAMES.set(b.id, b.name || b.id); });
+  if(selectedId && !list.some(b=> b.id === selectedId)){
+    list.push({ id: selectedId, name: selectedId === GENERAL_BATCH_ID ? 'Free Demo' : (ADMIN_BATCH_NAMES.get(selectedId) || selectedId) });
+    list.sort((a,b)=> a.name.localeCompare(b.name));
+  }
+  return '<option value="">All Batches</option>' + list.map(b=> `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join('');
+}
+
+/* Compact centered ⋮ menu (secondary / destructive actions). items: [{key,label,icon|iconHtml,danger}] */
+function openActionMenu(title, items, onSelect){
+  const ov = el(`<div class="overlay open" style="align-items:center;z-index:1200"><div class="sheet" style="border-radius:16px;max-width:320px;padding:14px;transform:none">
+    <div style="font-size:14px;font-weight:700;margin:2px 4px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(title || '')}</div>
+    ${items.map(i=> `<button type="button" class="btn btn-ghost batch-menu-item${i.danger ? ' danger' : ''}" data-a="${esc(i.key)}">${i.iconHtml || icon(i.icon,16)}<span>${esc(i.label)}</span></button>`).join('')}
+  </div></div>`);
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e=>{
+    if(e.target === ov){ ov.remove(); return; }
+    const b = e.target.closest('[data-a]'); if(!b) return;
+    ov.remove(); onSelect(b.dataset.a);
+  });
+}
+
+/* Edit sheet for ONE existing content document: updates that document in place (never creates one, never
+   touches batchId/batchName or any other collection). cfg.editFields(item) → [{k,label,value,type?,options?,placeholder?}];
+   cfg.buildUpdate(values, item) → { error } or { update }. */
+function openContentEditSheet(cfg, item){
+  const rows = cfg.editFields(item).map(f=>{
+    const v = f.value == null ? '' : f.value;
+    const ctl = f.options
+      ? `<select data-f="${esc(f.k)}">${f.options.map(o=> `<option value="${esc(o.v)}"${String(o.v) === String(v) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`
+      : `<input data-f="${esc(f.k)}" type="${f.type || 'text'}" value="${esc(v)}"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''}>`;
+    return `<div class="field"><label>${esc(f.label)}</label>${ctl}</div>`;
+  }).join('');
+  const ov = openBatchSheet(`<div class="card">
+    <div class="card-title">✏️ Edit ${esc(cfg.noun)}</div>${rows}
+    <div class="q-stat-preview">Updates this ${esc(cfg.noun)} only. Its batch and all student data stay as they are.</div>
+    <button class="btn btn-primary" data-save type="button">💾 Save changes</button>
+  </div>`);
+  const btn = $('[data-save]', ov);
+  btn.addEventListener('click', async ()=>{
+    const vals = {}; $all('[data-f]', ov).forEach(i=>{ vals[i.dataset.f] = i.value.trim(); });
+    const r = cfg.buildUpdate(vals, item);
+    if(r.error){ toast(r.error); return; }
+    btn.disabled = true;
+    try{
+      await db.collection(cfg.col).doc(item.id).update(Object.assign({}, r.update, { updatedAt: firebase.firestore.FieldValue.serverTimestamp() }));
+      toast('Saved'); ov.remove();
+    }catch(e){ console.error(e); toast('Could not save — check your connection.'); btn.disabled = false; }
+  });
+}
+
+const VIDEO_CFG = {
+  col: 'videos', noun: 'class', nouns: 'classes', emptyIcon: '🎬', emptyText: 'No recorded classes published yet.',
+  icon: v=> '▶️',
+  meta: v=> [v.subject, v.classNo ? 'Class ' + v.classNo : '', v.chapter, v.duration].filter(Boolean).join(' · '),
+  editFields: v=> [
+    { k:'title', label:'Title', value:v.title }, { k:'subject', label:'Subject', value:v.subject },
+    { k:'chapter', label:'Chapter', value:v.chapter }, { k:'classNo', label:'Class no.', value:v.classNo },
+    { k:'duration', label:'Duration', value:v.duration },
+    { k:'url', label:'YouTube link', value: v.ytId ? 'https://youtu.be/' + v.ytId : '' }
+  ],
+  buildUpdate: (f)=>{
+    if(!f.title) return { error:'Enter a title' };
+    const ytId = ytIdFromUrl(f.url); if(!ytId) return { error:'Enter the YouTube link' };
+    return { update:{ title:f.title, subject:f.subject, chapter:f.chapter, classNo:f.classNo, duration:f.duration, ytId } };
+  },
+  extraMenu: ()=> []
+};
+const LIVE_CFG = {
+  col: 'liveClasses', noun: 'live class', nouns: 'live classes', emptyIcon: '📅', emptyText: 'No live classes scheduled yet.',
+  icon: lc=> lc.status === 'live' ? '🔴' : lc.status === 'ended' ? '✅' : '📅',
+  meta: lc=> [lc.subject, lc.date, lc.time].filter(Boolean).join(' · '),
+  badges: lc=> `<span class="badge ${lc.status === 'live' ? 'badge-live' : 'badge-muted'}">${esc(lc.status || 'upcoming')}</span>`,
+  editFields: lc=> [
+    { k:'title', label:'Title', value:lc.title }, { k:'subject', label:'Subject', value:lc.subject },
+    { k:'meetLink', label:'Google Meet link', value:lc.meetLink },
+    { k:'date', label:'Date', value:lc.date, type:'date' }, { k:'time', label:'Time', value:lc.time, type:'time' }
+  ],
+  buildUpdate: (f)=>{
+    if(!f.title) return { error:'Enter a title' };
+    if(!f.meetLink) return { error:'Enter the Google Meet link' };
+    return { update:{ title:f.title, subject:f.subject, meetLink:f.meetLink, date:f.date, time:f.time } };
+  },
+  extraMenu: lc=> [
+    { key:'status:live',  label:'Mark Live',  iconHtml:'🔴' },
+    { key:'status:ended', label:'Mark Ended', icon:'check' }
+  ]
+};
+const NOTE_CFG = {
+  col: 'notes', noun: 'note', nouns: 'notes', emptyIcon: '📄', emptyText: 'No notes or assignments published yet.',
+  icon: n=> n.fileType === 'assignment' ? '📝' : n.downloadable ? '📥' : '🔒',
+  meta: n=> n.subject || '',
+  badges: n=> `<span class="badge ${n.downloadable ? 'badge-free' : 'badge-paid'}">${n.downloadable ? 'Downloadable' : 'View-only'}</span>${n.fileType === 'assignment' ? '<span class="badge badge-accent">Assignment</span>' : ''}`,
+  typeFilter: [ { v:'study', label:'📄 Study material' }, { v:'assignment', label:'📝 Assignment' } ],
+  typeOf: n=> n.fileType === 'assignment' ? 'assignment' : 'study',
+  editFields: n=> [
+    { k:'title', label:'Title', value:n.title }, { k:'subject', label:'Subject', value:n.subject },
+    { k:'fileType', label:'Type', value: n.fileType === 'assignment' ? 'assignment' : 'study', options:[{v:'study',label:'Study material'},{v:'assignment',label:'Assignment'}] },
+    { k:'downloadable', label:'Allow download?', value: n.downloadable ? 'yes' : 'no', options:[{v:'yes',label:'Yes — downloadable'},{v:'no',label:'No — view only'}] },
+    { k:'driveLink', label:'Google Drive share link', value: n.driveLink || '' }
+  ],
+  buildUpdate: (f)=>{
+    if(!f.title) return { error:'Enter a title' };
+    if(!f.driveLink) return { error:'Paste the Drive link' };
+    const driveId = driveIdFromUrl(f.driveLink); if(!driveId) return { error:'Could not read a file ID from that link' };
+    return { update:{ title:f.title, subject:f.subject, fileType:f.fileType, downloadable:f.downloadable === 'yes', driveId, driveLink:f.driveLink } };
+  },
+  extraMenu: ()=> []
+};
+
+/* Returns the unsubscribe function (also registered with trackUnsub, so a screen change cleans it up). */
+function renderPublishedContentSection(container, cfg){
+  const filterWrap = el('<div class="pt-filters"></div>');
+  const search = el(`<div class="search-input-wrap"><span class="si">${icon('search',15)}</span><input type="text" placeholder="Search ${esc(cfg.nouns)} by title..."></div>`);
+  const batchSel = el('<select data-role="batch" aria-label="Batch"></select>');
+  const typeSel = cfg.typeFilter ? el(`<select data-role="type" aria-label="Type"><option value="">All Types</option>${cfg.typeFilter.map(o=> `<option value="${esc(o.v)}">${esc(o.label)}</option>`).join('')}</select>`) : null;
+  filterWrap.appendChild(search);
+  if(typeSel){
+    const row = el('<div class="row2" style="margin-bottom:8px"></div>'); row.appendChild(batchSel); row.appendChild(typeSel); filterWrap.appendChild(row);
+  } else { batchSel.style.marginBottom = '8px'; filterWrap.appendChild(batchSel); }
+  const toolbar = el('<div class="filter-toolbar"><div class="count"></div><button class="btn-sm btn-ghost" type="button">✕ Clear Filters</button></div>');
+  filterWrap.appendChild(toolbar);
+  const listBox = el('<div><div class="spinner"></div></div>');
+  container.appendChild(filterWrap); container.appendChild(listBox);
+  const searchInput = $('input', search), countEl = $('.count', toolbar);
+
+  let items = null; // null until the first snapshot arrives
+
+  function clearFilters(){ searchInput.value = ''; if(typeSel) typeSel.value = ''; ADMIN_CONTENT_BATCH = ''; refresh(); }
+
+  function refresh(){
+    if(items === null) return;
+    batchSel.innerHTML = batchFilterOptions(items, ADMIN_CONTENT_BATCH);
+    batchSel.value = ADMIN_CONTENT_BATCH;
+    const q = searchInput.value.trim().toLowerCase(), tv = typeSel ? typeSel.value : '';
+    const filtered = items.filter(it=>{
+      if(ADMIN_CONTENT_BATCH && (it.batchId || '') !== ADMIN_CONTENT_BATCH) return false; // canonical batchId, not the name
+      if(tv && cfg.typeOf(it) !== tv) return false;
+      if(q && !((it.title || '') + ' ' + (it.subject || '')).toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a,b)=> (tsToMs(b.createdAt) || 0) - (tsToMs(a.createdAt) || 0));
+    countEl.textContent = items.length ? (filtered.length + ' of ' + items.length + ' ' + (items.length === 1 ? cfg.noun : cfg.nouns)) : '';
+    listBox.innerHTML = '';
+    if(!items.length){ listBox.appendChild(el(`<div class="empty-state"><div class="icon">${cfg.emptyIcon}</div>${esc(cfg.emptyText)}</div>`)); return; }
+    if(!filtered.length){
+      const es = el(`<div class="empty-state"><div class="icon">🔍</div>No ${esc(cfg.nouns)} match your filters.</div>`);
+      const b = el('<button class="btn btn-ghost" style="max-width:200px;margin:12px auto 0">✕ Clear Filters</button>');
+      b.addEventListener('click', clearFilters); es.appendChild(b); listBox.appendChild(es); return;
+    }
+    filtered.forEach(it=> listBox.appendChild(buildCard(it)));
+  }
+
+  function buildCard(it){
+    const off = it.active === false;
+    const badges = (cfg.badges ? cfg.badges(it) : '') + (off ? '<span class="badge badge-muted">Inactive</span>' : '') + sharedBadge(it);
+    const card = el(`<div class="item-card">
+      <div class="item-top"><div class="item-icon">${cfg.icon(it)}</div><div class="item-info">
+        <div class="item-title">${esc(it.title || 'Untitled')}</div>
+        <div class="item-meta">${esc(cfg.meta(it))}${(it.batchName || it.batch) ? (cfg.meta(it) ? ' · ' : '') + esc(it.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (it.batchName || it.batch)) : ''}</div>
+        ${badges ? `<div class="item-badges">${badges}</div>` : ''}
+      </div></div>
+      <div class="item-actions">
+        <button class="btn-sm btn-ghost" data-act="edit" type="button">${icon('edit',15)}<span>Edit</span></button>
+        <button class="btn-sm ${off ? 'btn-success' : 'btn-warning'}" data-act="toggle" type="button">${icon(off ? 'check' : 'ban',15)}<span>${off ? 'Activate' : 'Deactivate'}</span></button>
+        <button class="batch-menu-btn" data-act="menu" type="button" aria-label="Actions">⋮</button>
+      </div>
+    </div>`);
+    $all('button', card).forEach(b=> b.addEventListener('click', async ()=>{
+      const act = b.dataset.act;
+      if(act === 'edit'){ openContentEditSheet(cfg, it); return; }
+      if(act === 'toggle'){
+        b.disabled = true;
+        try{
+          await db.collection(cfg.col).doc(it.id).update({ active: off, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+          toast(off ? 'Activated' : 'Deactivated');
+        }catch(e){ console.error(e); toast('Could not update — check your connection.'); b.disabled = false; }
+        return;
+      }
+      openActionMenu(it.title, cfg.extraMenu(it).concat([{ key:'del', label:'Delete', icon:'trash', danger:true }]), async key=>{
+        if(key === 'del'){
+          if(!await confirmDelete()) return;
+          b.disabled = true;
+          try{ await db.collection(cfg.col).doc(it.id).delete(); toast('Deleted'); }
+          catch(e){ console.error(e); toast('Could not delete — check your connection.'); b.disabled = false; }
+        } else if(key.startsWith('status:')){
+          try{ await db.collection(cfg.col).doc(it.id).update({ status: key.slice(7) }); toast('Updated'); }
+          catch(e){ console.error(e); toast('Could not update — check your connection.'); }
+        }
+      });
+    }));
+    return card;
+  }
+
+  batchSel.addEventListener('change', ()=>{ ADMIN_CONTENT_BATCH = batchSel.value; refresh(); });
+  if(typeSel) typeSel.addEventListener('change', refresh);
+  searchInput.addEventListener('input', refresh);
+  $('button', toolbar).addEventListener('click', clearFilters);
+
+  const unsub = db.collection(cfg.col).onSnapshot(snap=>{
+    items = []; snap.forEach(d=> items.push({ id:d.id, ...d.data() }));
+    refresh();
+  }, err=>{ console.error(err); listBox.innerHTML = '<div class="empty-state">Could not load — check your connection.</div>'; });
+  trackUnsub(unsub);
+  return unsub;
+}
+
 function renderAdminClasses(container){
-  const subTabs = el(`<div class="tab-filter"><button data-s="recorded">📹 Recorded</button><button data-s="live">🔴 Live Class</button></div>`);
-  container.appendChild(subTabs);
+  let sub = 'published', teardown = null; // published | recorded | live
+  const tabs = el(`<div class="tab-filter"><button data-s="published">📋 Published Classes</button><button data-s="recorded">➕ Add Recorded</button><button data-s="live">➕ Add Live Class</button></div>`);
+  container.appendChild(tabs);
   const body = el(`<div></div>`);
   container.appendChild(body);
-  let sub = 'recorded';
-  $all('button',subTabs).forEach(b=> b.classList.toggle('active', b.dataset.s===sub));
-  subTabs.addEventListener('click', e=>{
-    const b=e.target.closest('button'); if(!b) return;
-    sub=b.dataset.s;
-    $all('button',subTabs).forEach(x=>x.classList.toggle('active',x===b));
-    draw();
-  });
-  function draw(){ body.innerHTML=''; if(sub==='recorded') drawRecordedForm(body); else drawLiveForm(body); }
+  function draw(){
+    if(teardown){ teardown(); teardown = null; }
+    $all('button',tabs).forEach(x=> x.classList.toggle('active', x.dataset.s===sub));
+    body.innerHTML = '';
+    if(sub==='published') teardown = drawPublishedClasses(body);
+    else if(sub==='recorded') drawRecordedForm(body);
+    else drawLiveForm(body);
+  }
+  tabs.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return; sub=b.dataset.s; draw(); });
   draw();
+}
+
+/* Published Classes: Recorded / Live Class, each with the shared Batch filter. */
+function drawPublishedClasses(body){
+  const chips = el(`<div class="tab-filter"><button data-k="recorded">📹 Recorded</button><button data-k="live">🔴 Live Class</button></div>`);
+  const box = el('<div></div>');
+  body.appendChild(chips); body.appendChild(box);
+  let unsub = null;
+  function draw(){
+    if(unsub){ unsub(); unsub = null; }
+    $all('button',chips).forEach(x=> x.classList.toggle('active', x.dataset.k===ADMIN_CLASS_KIND));
+    box.innerHTML = '';
+    unsub = renderPublishedContentSection(box, ADMIN_CLASS_KIND==='live' ? LIVE_CFG : VIDEO_CFG);
+  }
+  chips.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b || b.dataset.k===ADMIN_CLASS_KIND) return; ADMIN_CLASS_KIND=b.dataset.k; draw(); });
+  draw();
+  return ()=>{ if(unsub) unsub(); };
 }
 
 function drawRecordedForm(body){
@@ -6038,8 +6293,6 @@ function drawRecordedForm(body){
       <div class="field"><label>Duration</label><input id="vDuration" placeholder="48:32"></div>
       <button class="btn btn-primary" id="saveVideo">💾 Save to Firebase</button>
     </div>
-    <div class="card-title" style="margin:14px 0 8px">Uploaded videos</div>
-    <div id="videosAdminList"><div class="spinner"></div></div>
   </div>`));
   loadActiveBatchesInto($('#vBatch', body));
   $('#saveVideo', body).addEventListener('click', async ()=>{
@@ -6061,30 +6314,6 @@ function drawRecordedForm(body){
     ['vUrl','vTitle','vChapter','vClassNo','vDuration'].forEach(id=> $('#'+id,body).value='');
     batchSel.value = '';
   });
-  const listBox = $('#videosAdminList', body);
-  const unsub = db.collection(COL.videos).onSnapshot(snap=>{
-    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
-    listBox.innerHTML='';
-    if(!items.length){ listBox.innerHTML='<div class="empty-state">No videos yet.</div>'; return; }
-    items.forEach(v=>{
-      const card = el(`<div class="item-card">
-        <div class="item-top"><div class="item-icon">▶️</div><div class="item-info">
-          <div class="item-title">${esc(v.title)}</div>
-          <div class="item-meta">${esc(v.subject||'')}${(v.batchName||v.batch)?(' · '+esc(v.batchName||v.batch)):''}</div>
-          <div class="item-badges"><span class="badge ${v.access==='paid'?'badge-paid':'badge-free'}">${v.access==='paid'?'Paid':'Free'}</span></div>
-        </div></div>
-        <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
-      </div>`);
-      $('button',card).addEventListener('click', async (ev)=>{
-        if(!await confirmDelete()) return;
-        const btn = ev.currentTarget; btn.disabled = true;
-        try{ await db.collection(COL.videos).doc(v.id).delete(); toast('Deleted'); }
-        catch(e){ console.error(e); toast('Could not delete — check your connection.'); btn.disabled = false; }
-      });
-      listBox.appendChild(card);
-    });
-  });
-  trackUnsub(unsub);
 }
 
 function drawLiveForm(body){
@@ -6103,8 +6332,6 @@ function drawLiveForm(body){
       </div>
       <button class="btn btn-primary" id="saveLive">💾 Save to Firebase</button>
     </div>
-    <div class="card-title" style="margin:14px 0 8px">Scheduled classes</div>
-    <div id="liveAdminList"><div class="spinner"></div></div>
   </div>`));
   loadActiveBatchesInto($('#lBatch', body));
   $('#saveLive', body).addEventListener('click', async ()=>{
@@ -6123,38 +6350,6 @@ function drawLiveForm(body){
     toast('Saved to Firebase!');
     $('#lUrl',body).value=''; $('#lTitle',body).value=''; batchSel.value='';
   });
-  const listBox = $('#liveAdminList', body);
-  const unsub = db.collection(COL.liveClasses).onSnapshot(snap=>{
-    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
-    listBox.innerHTML='';
-    if(!items.length){ listBox.innerHTML='<div class="empty-state">No live classes yet.</div>'; return; }
-    items.forEach(lc=>{
-      const card = el(`<div class="item-card">
-        <div class="item-top"><div class="item-icon">${lc.status==='live'?'🔴':lc.status==='ended'?'✅':'📅'}</div><div class="item-info">
-          <div class="item-title">${esc(lc.title)}</div>
-          <div class="item-meta">${esc(lc.date||'')}${lc.time?(' · '+esc(lc.time)):''}${(lc.batchName||lc.batch)?(' · '+esc(lc.batchName||lc.batch)):''}</div>
-          <div class="item-badges"><span class="badge ${lc.status==='live'?'badge-live':'badge-muted'}">${esc(lc.status)}</span></div>
-        </div></div>
-        <div class="item-actions">
-          <button class="btn-sm btn-ghost" data-act="live">🔴 Mark Live</button>
-          <button class="btn-sm btn-ghost" data-act="ended">${icon('check',15)}<span>Mark Ended</span></button>
-          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
-        </div>
-      </div>`);
-      $all('button',card).forEach(b=> b.addEventListener('click', async ()=>{
-        if(b.dataset.act==='del'){
-          if(!await confirmDelete()) return;
-          b.disabled = true;
-          try{ await db.collection(COL.liveClasses).doc(lc.id).delete(); toast('Deleted'); }
-          catch(e){ console.error(e); toast('Could not delete — check your connection.'); b.disabled = false; }
-        } else {
-          await db.collection(COL.liveClasses).doc(lc.id).update({status:b.dataset.act}); toast('Updated');
-        }
-      }));
-      listBox.appendChild(card);
-    });
-  });
-  trackUnsub(unsub);
 }
 
 /* ================================================================
@@ -6294,10 +6489,9 @@ function renderPublishedTestsSection(container, getTests, opts){
   container.appendChild(listBox);
 
   function populateSelects(tests){
-    const batchSel = $('#ptBatch', selRow), curB = batchSel.value;
-    const batches = uniqueBatchesFromTests(tests);
-    batchSel.innerHTML = '<option value="">All Batches</option>' + batches.map(b=>`<option value="${esc(b.id)}">${esc(b.name)}</option>`).join('');
-    if(batches.some(b=>b.id===curB)) batchSel.value = curB;
+    const batchSel = $('#ptBatch', selRow);
+    batchSel.innerHTML = batchFilterOptions(tests, ADMIN_CONTENT_BATCH); // shared with Published Classes / Notes
+    batchSel.value = ADMIN_CONTENT_BATCH;
 
     const subjSel = $('#ptSubject', selRow), curS = subjSel.value;
     const subjects = uniqueSubjects(tests);
@@ -6307,6 +6501,7 @@ function renderPublishedTestsSection(container, getTests, opts){
 
   function clearFilters(){
     $('#ptSearch', searchWrap).value = '';
+    ADMIN_CONTENT_BATCH = '';
     $('#ptBatch', selRow).value = '';
     $('#ptSubject', selRow).value = '';
     $('#ptType', selRow2).value = '';
@@ -6366,26 +6561,34 @@ function renderPublishedTestsSection(container, getTests, opts){
         <div class="item-top"><div class="item-icon">${km.icon}</div><div class="item-info">
           <div class="item-title">${esc(t.title)}</div>
           <div class="item-meta">${esc(t.subject||'')}${(t.batchName||t.batch)?(' · '+esc(t.batchName||t.batch)):''}${t.questionCount?(' · '+t.questionCount+' Qs'):''}${t.duration?(' · '+t.duration+' min'):''}</div>
-          <div class="item-meta" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px"><span>${km.icon} ${km.label}${created ? (' · Created '+esc(fmtDate(created))) : ''}</span>${liveStatusBadge(t)}</div>
+          <div class="item-meta" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px"><span>${km.icon} ${km.label}${created ? (' · Created '+esc(fmtDate(created))) : ''}</span>${liveStatusBadge(t)}${t.active===false?'<span class="badge badge-muted">Inactive</span>':''}${sharedBadge(t)}</div>
         </div></div>
         <div class="item-actions">
           ${Array.isArray(t.questions) && t.questions.length ? `
-          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>
-          <button class="btn-sm btn-ghost" data-act="dup" title="Copy test" aria-label="Copy test">${icon('layers',15)}<span>Copy</span></button>` : ''}
+          <button class="btn-sm btn-ghost" data-act="edit">${icon('edit',15)}<span>Edit</span></button>` : ''}
           <button class="btn-sm ${t.active===false?'btn-success':'btn-warning'}" data-act="toggle">${icon(t.active===false?'check':'ban',15)}<span>${t.active===false?'Activate':'Deactivate'}</span></button>
-          <button class="btn-sm btn-danger" data-act="del">${icon('trash',15)}<span>Delete</span></button>
+          <button class="batch-menu-btn" data-act="menu" type="button" aria-label="Actions">⋮</button>
         </div>
       </div>`);
+      const structured = Array.isArray(t.questions) && t.questions.length;
       $all('button',card).forEach(b=>b.addEventListener('click', async ()=>{
-        if(b.dataset.act==='del'){
+        // ⋮ → Copy / Delete: the menu just re-dispatches to the same handlers below (nothing about Copy or Delete changed).
+        if(b.dataset.act==='menu'){
+          openActionMenu(t.title, (structured ? [{ key:'dup', label:'Copy', icon:'layers' }] : []).concat([{ key:'del', label:'Delete', icon:'trash', danger:true }]), key=> runAct(key, b));
+          return;
+        }
+        runAct(b.dataset.act, b);
+      }));
+      async function runAct(act, b){
+        if(act==='del'){
           if(!await confirmDelete()) return;
           b.disabled = true;
           try{ await db.collection(COL.tests).doc(t.id).delete(); toast('Deleted'); }
           catch(e){ console.error(e); toast('Could not delete — check your connection.'); b.disabled = false; }
         }
-        else if(b.dataset.act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
-        else if(b.dataset.act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
-        else if(b.dataset.act==='toggle'){
+        else if(act==='edit'){ openEditTestSheet(t, { duplicate:false }); }
+        else if(act==='dup'){ openEditTestSheet(t, { duplicate:true }); }
+        else if(act==='toggle'){
           // Visibility switch only — identical in spirit to Announcement/Banner activation, and
           // completely independent of Live Test scheduling (liveStartAt/liveEndAt untouched).
           b.disabled = true;
@@ -6394,13 +6597,13 @@ function renderPublishedTestsSection(container, getTests, opts){
             toast(t.active===false ? 'Activated' : 'Deactivated');
           }catch(e){ console.error(e); toast('Could not update — check your connection.'); b.disabled = false; }
         }
-      }));
+      }
       listBox.appendChild(card);
     });
   }
 
   $('#ptSearch', searchWrap).addEventListener('input', refresh);
-  selRow.addEventListener('change', refresh);
+  selRow.addEventListener('change', ()=>{ ADMIN_CONTENT_BATCH = $('#ptBatch', selRow).value; refresh(); });
   selRow2.addEventListener('change', refresh);
   $('#ptClear', toolbar).addEventListener('click', clearFilters);
 
@@ -7562,6 +7765,23 @@ function drawPasteForm(body){
 }
 
 function renderAdminNotes(container){
+  let sub = 'published', teardown = null; // published | add
+  const tabs = el(`<div class="tab-filter"><button data-s="published">📋 Published Notes</button><button data-s="add">➕ Add Note</button></div>`);
+  container.appendChild(tabs);
+  const body = el(`<div></div>`);
+  container.appendChild(body);
+  function draw(){
+    if(teardown){ teardown(); teardown = null; }
+    $all('button',tabs).forEach(x=> x.classList.toggle('active', x.dataset.s===sub));
+    body.innerHTML = '';
+    if(sub==='published') teardown = renderPublishedContentSection(body, NOTE_CFG);
+    else drawNoteForm(body);
+  }
+  tabs.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return; sub=b.dataset.s; draw(); });
+  draw();
+}
+
+function drawNoteForm(container){
   container.appendChild(el(`<div>
     <div class="card">
       <div class="card-title">➕ Add note / assignment (Google Drive)</div>
@@ -7581,8 +7801,6 @@ function renderAdminNotes(container){
       <div class="field"><label>Google Drive share link</label><input id="nDriveLink" placeholder="https://drive.google.com/file/d/xxxxxxxx/view"></div>
       <button class="btn btn-primary" id="uploadNote">💾 Save to Firebase</button>
     </div>
-    <div class="card-title" style="margin:14px 0 8px">Saved files</div>
-    <div id="notesAdminList"><div class="spinner"></div></div>
   </div>`));
   loadActiveBatchesInto($('#nBatch', container));
   $('#uploadNote', container).addEventListener('click', async ()=>{
@@ -7612,33 +7830,6 @@ function renderAdminNotes(container){
     }
     btn.disabled = false; btn.textContent = '💾 Save to Firebase';
   });
-  const listBox = $('#notesAdminList', container);
-  const unsub = db.collection(COL.notes).onSnapshot(snap=>{
-    const items=[]; snap.forEach(d=>items.push({id:d.id,...d.data()}));
-    listBox.innerHTML='';
-    if(!items.length){ listBox.innerHTML='<div class="empty-state">No files uploaded yet.</div>'; return; }
-    items.forEach(n=>{
-      const card = el(`<div class="item-card">
-        <div class="item-top"><div class="item-icon">${n.fileType==='assignment'?'📝':n.downloadable?'📥':'🔒'}</div><div class="item-info">
-          <div class="item-title">${esc(n.title)}</div>
-          <div class="item-meta">${esc(n.subject||'')}${(n.batchName||n.batch)?(' · '+esc(n.batchName||n.batch)):''}</div>
-          <div class="item-badges">
-            <span class="badge ${n.downloadable?'badge-free':'badge-paid'}">${n.downloadable?'Downloadable':'View-only'}</span>
-            ${n.paidOnly?'<span class="badge badge-paid">Paid</span>':''}
-          </div>
-        </div></div>
-        <div class="item-actions"><button class="btn-sm btn-danger">${icon('trash',15)}<span>Delete</span></button></div>
-      </div>`);
-      $('button',card).addEventListener('click', async (ev)=>{
-        if(!await confirmDelete()) return;
-        const btn = ev.currentTarget; btn.disabled = true;
-        try{ await db.collection(COL.notes).doc(n.id).delete(); toast('Deleted'); }
-        catch(e){ console.error(e); toast('Could not delete — check your connection.'); btn.disabled = false; }
-      });
-      listBox.appendChild(card);
-    });
-  });
-  trackUnsub(unsub);
 }
 
 /* ================================================================
