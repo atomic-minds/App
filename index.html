@@ -351,6 +351,9 @@ mjx-container{color:var(--text) !important}
 .batch-menu-btn{width:36px;height:36px;padding:0;font-size:20px;line-height:1;font-weight:700;border-radius:8px;
   background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center}
 .batch-menu-btn:active{border-color:var(--accent)}
+/* ⋮ inside a card action row: compact square that takes its height from the row (the other buttons), instead of
+   a fixed 36px that stretched Edit / Deactivate taller. The Batches card ⋮ (not in .item-actions) is unchanged. */
+.item-actions .batch-menu-btn{width:30px;height:auto;min-height:0}
 .batch-menu-item.danger{color:var(--danger)}
 .batch-menu-item{display:flex;align-items:center;justify-content:flex-start;gap:10px;text-align:left;margin-bottom:6px}
 .mc-group-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13.5px;font-weight:700;margin:12px 0 4px}
