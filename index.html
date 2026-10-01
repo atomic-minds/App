@@ -4366,8 +4366,10 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
 .nb.submitStyle{background:#ef4444;color:#fff}
 .result{background:#161b22;border-radius:10px;padding:16px;text-align:center;margin-bottom:10px}
 .rmeta{font-size:12px;color:#8b949e;margin-top:3px}
-.score{font-size:34px;font-weight:700;color:#7f77dd;margin:8px 0 2px}
-.score-out{color:#8b949e}
+.score{font-size:34px;font-weight:400;color:#d8d8d8;margin:8px 0 2px}
+.score-num{color:#70e8d0}
+.score-slash{font-size:.8em}
+.score-out{font-size:.59em;color:#d8d8d8}
 .chips{display:flex;justify-content:center;flex-wrap:wrap;gap:6px;margin-top:10px}
 .chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
 .c-ok{background:rgba(34,197,94,.2);color:#4ade80}
@@ -4423,6 +4425,7 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
   .result{background:#fff;border:1px solid #999;color:#111;padding:10px 0;page-break-inside:avoid;break-inside:avoid}
   .rmeta{color:#333}
   .score{color:#111}
+  .score-num{color:#111}
   .score-out{color:#555}
   .chip{border:1px solid #999 !important;background:#fff !important;color:#111 !important}
   .sol{display:block !important;background:#fff;border:1px solid #ccc;color:#111;page-break-inside:avoid;break-inside:avoid;margin-top:14px}
@@ -4818,7 +4821,7 @@ function tmsPlayerMain(){
     out += '<div class="result"><div class="rmeta">'+h(TITLE)+'</div>';
     if(v.studentName) out += '<div class="rmeta">Student: <b>'+h(v.studentName)+'</b></div>';
     out += '<div class="rmeta">'+h(v.label||'')+(v.submittedAtMs ? ' · '+h(fmtDate(v.submittedAtMs)) : '')+'</div>';
-    out += '<div class="score">'+num(v.score)+'<span class="score-out">/'+num(v.total)+(pct!=null?' ('+pct+'%)':'')+'</span></div>';
+    out += '<div class="score"><span class="score-num">'+num(v.score)+'</span><span class="score-slash">/</span><span class="score-out">'+num(v.total)+(pct!=null?' ('+pct+'%)':'')+'</span></div>';
     out += '<div class="chips"><span class="chip c-ok">\u2713 '+v.correct+' correct</span><span class="chip c-no">\u2717 '+v.wrong+' wrong</span><span class="chip c-un">\u2014 '+v.skipped+' unanswered</span></div>';
     out += '<div class="rmeta" style="margin-top:6px">Total active time: '+(anyTiming ? fmtDur(totalTime) : 'Not available') + '</div>';
     out += '</div>';
