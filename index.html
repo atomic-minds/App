@@ -251,6 +251,7 @@ mjx-container{color:var(--text) !important}
 .tab-filter{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;margin-bottom:12px}
 .tab-filter button{padding:6px 13px;border:1px solid var(--border);background:none;border-radius:20px;
   font-size:13px;color:var(--text-dim);white-space:nowrap}
+.tab-filter.tab-wrap{flex-wrap:wrap}   /* opt-in: Published Classes' 3 tabs are wider than a phone; wrap instead of hiding "Add Live Class" off-screen */
 .tab-filter button.active{background:rgba(155,140,232,.15);color:var(--accent);border-color:var(--accent)}
 
 .search-input-wrap{position:relative;margin-bottom:10px}
@@ -1453,6 +1454,7 @@ function homeNextLiveTest(withinMs){
   let best = null;
   (HOME.liveTests || []).forEach(t=>{
     if(!scope.has(t.batchId) || testKind(t) !== 'live') return;
+    if(t.active === false) return;   // deactivated tests never show here (same client-side layer the Tests tab already has; Firestore rules cannot filter a query's results)
     const s = tsToMs(t.liveStartAt);
     if(s == null || s <= now) return;
     if(withinMs != null && s > now + withinMs) return;
@@ -5579,7 +5581,7 @@ function openBatchDetail(batch){
     toast('Updated'); overlay.remove();
   });
   $('#deleteBatchBtn', overlay).addEventListener('click', async ()=>{
-    if(!confirm('Delete this batch? Enrolled students lose this enrollment only — their account, results and payments are untouched.')) return;
+    if(!await adminConfirmSheet({ title:'Delete this batch?', lines:['Enrolled students lose this enrollment only — their account, results and payments are untouched.'], cancel:'Cancel', confirm:'Delete' })) return;
     try{
       const enrollSnap = await db.collection(COL.enrollments).where('batchId','==',batch.id).get();
       const affectedStudentIds = []; const dels = [];
@@ -5893,8 +5895,8 @@ function openStudentDetail(s){
     toast('Device reset — student can log in on a new device now.');
   });
   $('#permDelete', overlay).addEventListener('click', async ()=>{
-    if(!confirm('Are you sure you want to permanently delete this student?')) return;
-    if(!confirm('All student-specific TMS data will be permanently deleted.\nThis action cannot be undone.')) return;
+    if(!await adminConfirmSheet({ title:'Are you sure you want to permanently delete this student?', cancel:'Cancel', confirm:'Delete' })) return;
+    if(!await adminConfirmSheet({ title:'All student-specific TMS data will be permanently deleted.', lines:['This action cannot be undone.'], cancel:'Cancel', confirm:'Delete permanently' })) return;
     const btn = $('#permDelete', overlay);
     btn.disabled = true; btn.textContent = 'Deleting...';
     try{
@@ -6249,7 +6251,7 @@ function renderPublishedContentSection(container, cfg){
 
 function renderAdminClasses(container){
   let sub = 'published', teardown = null; // published | recorded | live
-  const tabs = el(`<div class="tab-filter"><button data-s="published">📋 Published Classes</button><button data-s="recorded">➕ Add Recorded</button><button data-s="live">➕ Add Live Class</button></div>`);
+  const tabs = el(`<div class="tab-filter tab-wrap"><button data-s="published">📋 Published Classes</button><button data-s="recorded">➕ Add Recorded</button><button data-s="live">➕ Add Live Class</button></div>`);
   container.appendChild(tabs);
   const body = el(`<div></div>`);
   container.appendChild(body);
@@ -7948,7 +7950,7 @@ function renderAdminAnnouncements(container){
             toast(a.active===false ? 'Activated' : 'Deactivated');
           }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
         } else if(b.dataset.act==='del'){
-          if(!confirm('Delete this announcement? Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.')) return;
+          if(!await adminConfirmSheet({ title:'Delete this announcement?', lines:['Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.'], cancel:'Cancel', confirm:'Delete' })) return;
           try{
             await db.collection(COL.announcements).doc(a.id).delete();
             toast('Deleted');
@@ -8063,7 +8065,7 @@ function renderAdminBanners(container){
             toast(b.active===false ? 'Activated' : 'Deactivated');
           }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
         } else if(btn2.dataset.act==='del'){
-          if(!confirm('Delete this banner? It will no longer show on the student dashboard. This does not affect students, enrollments, batches, content, results, payments, or announcements.')) return;
+          if(!await adminConfirmSheet({ title:'Delete this banner?', lines:['It will no longer show on the student dashboard. This does not affect students, enrollments, batches, content, results, payments, or announcements.'], cancel:'Cancel', confirm:'Delete' })) return;
           try{
             await db.collection(COL.banners).doc(b.id).delete();
             toast('Deleted');
@@ -8326,7 +8328,7 @@ function renderAdminCalendar(container){
             toast(cancelled ? 'Restored' : 'Class cancelled');
           }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
         } else if(b.dataset.act==='del'){
-          if(!confirm('Delete this class from the schedule? Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.')) return;
+          if(!await adminConfirmSheet({ title:'Delete this class from the schedule?', lines:['Students will no longer see it. This does not affect students, enrollments, batches, content, results or payments.'], cancel:'Cancel', confirm:'Delete' })) return;
           try{
             await db.collection(COL.classSchedules).doc(c.id).delete();
             toast('Deleted');
@@ -8473,7 +8475,7 @@ function renderAdminCalendar(container){
         }catch(err){ console.error(err); toast('Action failed — check your connection.'); }
       });
       $('[data-act="del"]', card).addEventListener('click', async ()=>{
-        if(!confirm('Delete this recurring schedule? Students will no longer see any of its future classes. Past occurrences already shown to students are unaffected — this does not touch one-time classes, students, enrollments, batches, content, results or payments.')) return;
+        if(!await adminConfirmSheet({ title:'Delete this recurring schedule?', lines:['Students will no longer see any of its future classes. Past occurrences already shown to students are unaffected — this does not touch one-time classes, students, enrollments, batches, content, results or payments.'], cancel:'Cancel', confirm:'Delete' })) return;
         try{
           await db.collection(COL.classScheduleRules).doc(r.id).delete();
           toast('Deleted');
