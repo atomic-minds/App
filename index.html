@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Atomic Minds</title>
 <meta name="description" content="Atomic Minds — Stop Memorizing. Start realizing.">
+<link rel="preload" as="image" href="logo.png">
 <meta name="theme-color" content="#12081c">
 <meta name="color-scheme" content="dark">
 
@@ -171,8 +172,22 @@ select:focus{border-color:var(--accent)}
 @keyframes spIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
 @keyframes spHalo{from{opacity:.25}to{opacity:.6}}
 @keyframes spRing{from{opacity:.75;transform:scale(1)}to{opacity:0;transform:scale(2.3)}}
-@media (prefers-reduced-motion:reduce){#tmsSplash .sp-stage{transform:none}#tmsSplash.sp-go .sp-stage{animation-name:spFade;animation-duration:.5s}#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}@keyframes spFade{from{opacity:0}to{opacity:1}}}
+#tmsSplash .sp-stage{will-change:transform,opacity}
+#tmsSplash .sp-img{opacity:0;transition:opacity .12s linear}
+#tmsSplash .sp-img.sp-ready{opacity:1}
+/* installed PWA: Android's own splash already shows the icon, so start from that icon's size (--sp-from, set by the controller), fully visible, and zoom up */
+#tmsSplash.sp-pwa .sp-stage{opacity:1;transform:scale(var(--sp-from,.68))}
+#tmsSplash.sp-pwa.sp-go .sp-stage{animation:spZoom 1s cubic-bezier(.22,.7,.2,1) forwards}
+@keyframes spZoom{from{transform:scale(var(--sp-from,.68))}to{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}}   /* only the halo pulse is dropped; the zoom and the spark still play (short, under 3 s) */
 .brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
+/* soft violet glow behind the emblem on the two login screens (the logo img stays unwrapped-in-isolation so its lighten blend still sees the glow + card) */
+.logo-glow{position:relative;display:flex;justify-content:center;width:100%}
+.logo-glow::before{content:"";position:absolute;left:50%;top:50%;width:210px;height:170px;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(closest-side,rgba(139,109,240,.5) 0%,rgba(139,109,240,.26) 42%,rgba(139,109,240,0) 100%);pointer-events:none;animation:logoGlow 3.6s ease-in-out infinite alternate}
+.logo-glow .logo-mark,.brand-row .brand-name,.brand-row .brand-tagline{position:relative}   /* paint above the glow */
+@keyframes logoGlow{from{opacity:.6}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.logo-glow::before{animation:none;opacity:.85}}
 .brand-name{font-size:22px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
 .brand-tagline{font-size:13px;color:var(--text-muted);margin-top:2px}
 
@@ -424,7 +439,7 @@ mjx-container{color:var(--text) !important}
 <div id="tmsSplash" aria-hidden="true">
   <div class="sp-stage">
     <div class="sp-halo"></div>
-    <img class="sp-img" src="logo.png" alt="" draggable="false">
+    <img class="sp-img" src="logo.png" alt="" draggable="false" decoding="sync">
     <svg class="sp-fx" viewBox="200 290 840 680" preserveAspectRatio="none" focusable="false">
       <defs>
         <radialGradient id="spGlow"><stop offset="0" stop-color="#c9b8ff" stop-opacity=".95"/><stop offset=".35" stop-color="#9b7cf5" stop-opacity=".55"/><stop offset="1" stop-color="#7c5cf0" stop-opacity="0"/></radialGradient>
@@ -436,6 +451,22 @@ mjx-container{color:var(--text) !important}
     </svg>
   </div>
 </div>
+
+<script>
+/* Runs before first paint. Standalone (installed PWA) launch => Android already showed its splash icon, so the web splash starts
+   from that icon's size. The OS icon canvas is 288 dp and the emblem fills 56.5% of it (162.6 dp wide); ours is stage*84.3% wide. */
+(function(){
+  var sp = document.getElementById('tmsSplash'), img = sp && sp.querySelector('.sp-img'); if(!sp) return;
+  var pwa = false; try{ pwa = window.navigator.standalone === true || ['standalone','fullscreen','minimal-ui'].some(function(m){ return window.matchMedia('(display-mode: ' + m + ')').matches; }); }catch(e){}
+  if(pwa){
+    var stageW = Math.min(0.7 * (document.documentElement.clientWidth || window.innerWidth || 360), 380);
+    sp.style.setProperty('--sp-from', Math.max(0.4, Math.min(0.95, 192.9 / stageW)).toFixed(3));
+    sp.classList.add('sp-pwa');
+  }
+  function ready(){ img.classList.add('sp-ready'); }
+  if(img){ if(img.complete && img.naturalWidth) ready(); else { img.addEventListener('load', ready); img.addEventListener('error', ready); } }
+})();
+</script>
 
 <div id="app">
   <div style="min-height:100vh;display:flex;align-items:center;justify-content:center">
@@ -856,7 +887,7 @@ function renderAuthScreen(){
 
   card.appendChild(el(`
     <div class="brand-row">
-      ${buildLogo(64)}
+      <div class="logo-glow">${buildLogo(64)}</div>
       <div class="brand-name">${BRAND.name}</div>
       <div class="brand-tagline">${BRAND.tagline}</div>
     </div>
@@ -1026,7 +1057,7 @@ function renderAdminLoginScreen(){
   const card = $('.auth-card', wrap);
   card.appendChild(el(`
     <div class="brand-row">
-      ${buildLogo(56)}
+      <div class="logo-glow">${buildLogo(56)}</div>
       <div class="brand-name" style="font-size:17px">${BRAND.name} · Admin</div>
       <div class="brand-tagline">Teacher &amp; owner panel</div>
     </div>
@@ -4447,15 +4478,24 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
 .nb.submitStyle{background:#ef4444;color:#fff}
 .result{background:#161b22;border-radius:10px;padding:16px;text-align:center;margin-bottom:10px}
 .rmeta{font-size:12px;color:#8b949e;margin-top:3px}
-.score{font-size:34px;font-weight:400;color:#d8d8d8;margin:8px 0 2px}
-.score-num{color:#70e8d0}
-.score-slash{font-size:.8em}
-.score-out{font-size:.59em;color:#d8d8d8}
-.chips{display:flex;justify-content:center;flex-wrap:wrap;gap:6px;margin-top:10px}
-.chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px}
-.c-ok{background:rgba(34,197,94,.2);color:#4ade80}
-.c-no{background:rgba(239,68,68,.22);color:#f87171}
-.c-un{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.45)}
+.score{display:flex;align-items:center;justify-content:center;gap:10px;margin:14px 0 4px;line-height:1}
+.score-num{font-size:52px;font-weight:800;color:#8b7cf6;letter-spacing:-1px}
+.score-out{font-size:30px;font-weight:500;color:#8a90b8;align-self:flex-end;padding-bottom:5px}
+.score-div{width:1px;height:42px;background:#363c63;margin:0 6px}
+.score-pct{font-size:18px;font-weight:700;color:#e9e6ff;background:rgba(124,108,246,.16);border:1px solid rgba(139,124,246,.38);border-radius:20px;padding:7px 15px}
+.rstats{display:grid;grid-template-columns:repeat(3,1fr);margin:16px 0 0;border:1px solid #2a3150;background:rgba(10,14,28,.55);border-radius:12px}
+.rs{position:relative;padding:12px 4px 11px;min-width:0}
+.rs+.rs::before{content:"";position:absolute;left:0;top:20%;bottom:20%;width:1px;background:#2a3150}
+.rs-top{display:flex;align-items:center;justify-content:center;gap:8px}
+.rs-ic{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.rs-ic svg{width:14px;height:14px;display:block;fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.rs-n{font-size:22px;font-weight:800;line-height:1}
+.rs-l{font-size:12.5px;color:#8b93c4;margin-top:6px}
+.rs-ok .rs-ic{background:#1f9a62}.rs-ok .rs-n{color:#4ade99}
+.rs-no .rs-ic{background:#b3364a}.rs-no .rs-n{color:#f26b7c}
+.rs-un .rs-ic{background:#3a4070}.rs-un .rs-ic svg{stroke:#c9cdf5}.rs-un .rs-n{color:#b4b9f0}
+.rtime{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:14px;font-size:13px;color:#8b93c4}
+.rtime svg{width:17px;height:17px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .banner{background:#1f1a0d;border:1px solid #6b5a1a;color:#fbbf24;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.5;margin-bottom:10px}
 .sol{background:#161b22;border-radius:10px;padding:12px;margin-top:10px;scroll-margin-top:8px}
 .sol.correct{border-left:3px solid #22c55e}
@@ -4505,10 +4545,15 @@ mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
   .banner{display:none !important}
   .result{background:#fff;border:1px solid #999;color:#111;padding:10px 0;page-break-inside:avoid;break-inside:avoid}
   .rmeta{color:#333}
-  .score{color:#111}
   .score-num{color:#111}
   .score-out{color:#555}
-  .chip{border:1px solid #999 !important;background:#fff !important;color:#111 !important}
+  .score-div{background:#999}
+  .score-pct{background:#fff;border:1px solid #999;color:#111}
+  .rstats{background:#fff;border:1px solid #999}
+  .rs+.rs::before{background:#999}
+  .rs-n,.rs-l,.rtime{color:#111 !important}
+  .rs-ic{background:#fff !important;border:1px solid #666}
+  .rs-ic svg{stroke:#111 !important}
   .sol{display:block !important;background:#fff;border:1px solid #ccc;color:#111;page-break-inside:avoid;break-inside:avoid;margin-top:14px}
   .sol.correct{border-left:4px solid #16a34a}
   .sol.wrong,.sol.unans{border-left:4px solid #dc2626}
@@ -4902,9 +4947,13 @@ function tmsPlayerMain(){
     out += '<div class="result"><div class="rmeta">'+h(TITLE)+'</div>';
     if(v.studentName) out += '<div class="rmeta">Student: <b>'+h(v.studentName)+'</b></div>';
     out += '<div class="rmeta">'+h(v.label||'')+(v.submittedAtMs ? ' · '+h(fmtDate(v.submittedAtMs)) : '')+'</div>';
-    out += '<div class="score"><span class="score-num">'+num(v.score)+'</span><span class="score-slash">/</span><span class="score-out">'+num(v.total)+(pct!=null?' ('+pct+'%)':'')+'</span></div>';
-    out += '<div class="chips"><span class="chip c-ok">\u2713 '+v.correct+' correct</span><span class="chip c-no">\u2717 '+v.wrong+' wrong</span><span class="chip c-un">\u2014 '+v.skipped+' unanswered</span></div>';
-    out += '<div class="rmeta" style="margin-top:6px">Total active time: '+(anyTiming ? fmtDur(totalTime) : 'Not available') + '</div>';
+    out += '<div class="score"><span class="score-num">'+num(v.score)+'</span><span class="score-out">/'+num(v.total)+'</span>'+(pct!=null?'<span class="score-div"></span><span class="score-pct">'+pct+'%</span>':'')+'</div>';
+    out += '<div class="rstats">' +
+      '<div class="rs rs-ok"><div class="rs-top"><span class="rs-ic"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span class="rs-n">'+v.correct+'</span></div><div class="rs-l">Correct</div></div>' +
+      '<div class="rs rs-no"><div class="rs-top"><span class="rs-ic"><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></span><span class="rs-n">'+v.wrong+'</span></div><div class="rs-l">Wrong</div></div>' +
+      '<div class="rs rs-un"><div class="rs-top"><span class="rs-ic"><svg viewBox="0 0 24 24"><path d="M6.5 12h11"/></svg></span><span class="rs-n">'+v.skipped+'</span></div><div class="rs-l">Unanswered</div></div>' +
+      '</div>';
+    out += '<div class="rtime"><svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.5 1.5M9.5 3h5M12 3v3"/></svg><span>Total active time: '+(anyTiming ? fmtDur(totalTime) : 'Not available') + '</span></div>';
     out += '</div>';
 
     // ---- filters (display-only: toggles which .sol cards are visible; never touches answers/
