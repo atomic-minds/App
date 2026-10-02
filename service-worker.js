@@ -8,7 +8,7 @@
 // resilience. Firebase, Firestore's realtime channel, Google Drive,
 // YouTube, and MathJax's CDN are never touched by this file at all.
 
-const CACHE_NAME = 'atomic-minds-v10'; // v10: adds the notificationclick handler
+const CACHE_NAME = 'atomic-minds-v11'; // v11: new brand icons + logo.png (bump so installed copies drop the old cached icons)
 const STATIC_ASSETS = ['./manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
