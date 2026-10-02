@@ -171,7 +171,7 @@ select:focus{border-color:var(--accent)}
 @keyframes spIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
 @keyframes spHalo{from{opacity:.25}to{opacity:.6}}
 @keyframes spRing{from{opacity:.75;transform:scale(1)}to{opacity:0;transform:scale(2.3)}}
-@media (prefers-reduced-motion:reduce){#tmsSplash.sp-go .sp-stage{animation-duration:.01s}#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}}
+@media (prefers-reduced-motion:reduce){#tmsSplash .sp-stage{transform:none}#tmsSplash.sp-go .sp-stage{animation-name:spFade;animation-duration:.5s}#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}@keyframes spFade{from{opacity:0}to{opacity:1}}}
 .brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
 .brand-name{font-size:22px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
 .brand-tagline{font-size:13px;color:var(--text-muted);margin-top:2px}
@@ -454,18 +454,23 @@ mjx-container{color:var(--text) !important}
 
 <script>
 /* Startup splash controller. Pure UI: no Firebase, no auth, no storage writes, nothing the app reads.
-   Lasts ~2.8 s, then fades out once the app has rendered its first real screen (login or dashboard).
+   The spark lap is driven by ACCUMULATED frame time (each frame counts for at most 50 ms), and it only starts once the
+   app's big boot script has finished running (see __tmsSplashBoot at the end of the page). That way a busy phone can
+   stall the main thread without the lap being skipped or teleporting: it simply plays out in full, then the splash fades
+   once the app has drawn its first real screen (login or dashboard). It also plays when the phone reports
+   "reduce motion" (the lap is a small glow moving ~1.5 s; only the scale-in and halo pulse are dropped then).
    A browser refresh (navigation type "reload") skips it, so a student reloading mid-test is never delayed. */
 (function(){
   var sp = document.getElementById('tmsSplash'); if(!sp) return;
   var nav = ''; try{ nav = (performance.getEntriesByType('navigation')[0] || {}).type || ''; }catch(e){}
   if(nav === 'reload'){ sp.parentNode.removeChild(sp); return; }
-  var reduce = false; try{ reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
   var app = document.getElementById('app'), img = sp.querySelector('.sp-img');
-  var MIN = reduce ? 1200 : 2800, MAX = 9000, pageT0 = performance.now(), t0 = 0, started = false, closing = false, raf = 0;
+  var theme = document.querySelector('meta[name="theme-color"]'), themeWas = theme ? theme.getAttribute('content') : null;
+  if(theme) theme.setAttribute('content', '#0e011d');   // status bar matches the splash while it is up; restored on close
+  var LAP_DELAY = 450, LAP_MS = 1500, SETTLE = 750, FALLBACK_ARM = 2200, MAX = 9000;
+  var pageT0 = performance.now(), started = false, armed = false, closing = false, raf = 0, last = 0, clock = 0, lapDone = false, doneAt = 0;
   /* middle orbit of the supplied artwork, in the artwork's own pixel space (fitted from the PNG) */
-  var CX = 624.1, CY = 678.3, A = 339.7, B = 85.4, T_START = Math.atan2((730 - CY) / B, (362 - CX) / A);
-  var LAP_DELAY = 550, LAP_MS = 1700, TAIL = 9;
+  var CX = 624.1, CY = 678.3, A = 339.7, B = 85.4, T_START = Math.atan2((730 - CY) / B, (362 - CX) / A), TAIL = 9;
   var head = document.getElementById('spHead'), glow = document.getElementById('spHeadGlow'), trail = document.getElementById('spTrail'), dots = [];
   for(var i = 0; i < TAIL; i++){
     var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -475,11 +480,15 @@ mjx-container{color:var(--text) !important}
   function pos(t){ return [CX + A * Math.cos(t), CY + B * Math.sin(t)]; }
   function place(el, p, r, o){ el.setAttribute('cx', p[0].toFixed(1)); el.setAttribute('cy', p[1].toFixed(1)); if(r) el.setAttribute('r', r); el.setAttribute('opacity', o); }
   function frame(now){
-    var k = (now - t0 - LAP_DELAY) / LAP_MS;
-    if(k < 0){ raf = requestAnimationFrame(frame); return; }
+    raf = requestAnimationFrame(frame);
+    var dt = last ? Math.min(now - last, 50) : 16; last = now;
+    if(!armed || lapDone) return;
+    clock += dt;
+    var k = (clock - LAP_DELAY) / LAP_MS;
+    if(k < 0) return;
     if(k >= 1){
       [head, glow].forEach(function(n){ n.setAttribute('opacity', 0); }); dots.forEach(function(d){ d.setAttribute('opacity', 0); });
-      sp.classList.add('sp-merge'); return;   // the spark ends exactly on the logo's own electron
+      sp.classList.add('sp-merge'); lapDone = true; doneAt = performance.now(); return;   // ends exactly on the logo's own electron
     }
     var fade = k < .12 ? k / .12 : k > .88 ? (1 - k) / .12 : 1;
     var p = pos(T_START + ease(k) * 2 * Math.PI);
@@ -488,7 +497,6 @@ mjx-container{color:var(--text) !important}
       var kk = Math.max(0, k - (j + 1) * .018);
       place(dots[j], pos(T_START + ease(kk) * 2 * Math.PI), 8 - j * .7, (.5 - j * .05) * fade);
     }
-    raf = requestAnimationFrame(frame);
   }
   function isReady(){
     var f = app && app.firstElementChild;
@@ -496,20 +504,24 @@ mjx-container{color:var(--text) !important}
   }
   function close(){
     if(closing) return; closing = true; if(raf) cancelAnimationFrame(raf);
+    if(theme && themeWas !== null) theme.setAttribute('content', themeWas);
     sp.classList.add('sp-out'); setTimeout(function(){ if(sp.parentNode) sp.parentNode.removeChild(sp); }, 700);
   }
   function check(){
+    if(closing) return;
     var now = performance.now();
-    if(started && now - t0 >= MIN && isReady()) close();
+    if(lapDone && now - doneAt >= SETTLE && isReady()) close();
     else if(now - pageT0 >= MAX) close();
   }
+  function arm(){ if(armed) return; armed = true; }
+  window.__tmsSplashBoot = arm;   // called by a one-line script after the app's boot script has finished executing
   function go(){
-    if(started) return; started = true; t0 = performance.now(); sp.classList.add('sp-go');
-    if(!reduce) raf = requestAnimationFrame(frame);
-    setTimeout(check, MIN + 20);
+    if(started) return; started = true; sp.classList.add('sp-go');
+    raf = requestAnimationFrame(frame);
+    setTimeout(arm, FALLBACK_ARM);   // never depend on the boot signal alone
   }
   if(app && window.MutationObserver) new MutationObserver(check).observe(app, { childList: true });
-  setInterval(function(){ if(!closing) check(); }, 400);   // safety net if a render happens without a DOM mutation we can see
+  setInterval(check, 300);
   if(img && !img.complete){ img.addEventListener('load', go); img.addEventListener('error', go); setTimeout(go, 1500); } else go();
 })();
 </script>
@@ -8630,5 +8642,6 @@ if('serviceWorker' in navigator){
   });
 })();
 </script>
+<script>window.__tmsSplashBoot && window.__tmsSplashBoot();</script>
 </body>
 </html>
