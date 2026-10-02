@@ -157,7 +157,21 @@ select:focus{border-color:var(--accent)}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* -------- logo -------- */
-.logo-mark{display:block;margin:0 auto}
+.logo-mark{display:block;margin:0 auto;object-fit:contain;mix-blend-mode:lighten;-webkit-user-select:none;user-select:none}  /* lighten: the supplied PNG's flat #0e011d backdrop melts into the dark UI; the artwork itself is untouched */
+/* -------- startup splash (animates the supplied logo.png; nothing is redrawn) -------- */
+#tmsSplash{position:fixed;inset:0;z-index:100000;background:#0e011d;display:flex;align-items:center;justify-content:center;transition:opacity .45s ease}
+#tmsSplash.sp-out{opacity:0;pointer-events:none}
+#tmsSplash .sp-stage{position:relative;width:min(70vw,380px);aspect-ratio:840/680;opacity:0;transform:scale(.92)}
+#tmsSplash.sp-go .sp-stage{animation:spIn .7s cubic-bezier(.2,.7,.2,1) forwards}
+#tmsSplash .sp-halo{position:absolute;inset:-6%;border-radius:50%;background:radial-gradient(closest-side,rgba(139,109,240,.34),rgba(139,109,240,0) 70%);opacity:0}
+#tmsSplash.sp-go .sp-halo{animation:spHalo 2.2s ease-in-out .6s infinite alternate}
+#tmsSplash .sp-img,#tmsSplash .sp-fx{position:absolute;inset:0;width:100%;height:100%;display:block}
+#tmsSplash .sp-ring{opacity:0;transform-box:fill-box;transform-origin:center}
+#tmsSplash.sp-merge .sp-ring{animation:spRing .9s ease-out forwards}
+@keyframes spIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+@keyframes spHalo{from{opacity:.25}to{opacity:.6}}
+@keyframes spRing{from{opacity:.75;transform:scale(1)}to{opacity:0;transform:scale(2.3)}}
+@media (prefers-reduced-motion:reduce){#tmsSplash.sp-go .sp-stage{animation-duration:.01s}#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}}
 .brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
 .brand-name{font-size:22px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
 .brand-tagline{font-size:13px;color:var(--text-muted);margin-top:2px}
@@ -406,6 +420,23 @@ mjx-container{color:var(--text) !important}
 </head>
 <body>
 
+<!-- Startup splash: the supplied logo.png is the artwork; the SVG layer only draws a travelling glow along its middle orbit. -->
+<div id="tmsSplash" aria-hidden="true">
+  <div class="sp-stage">
+    <div class="sp-halo"></div>
+    <img class="sp-img" src="logo.png" alt="" draggable="false">
+    <svg class="sp-fx" viewBox="200 290 840 680" preserveAspectRatio="none" focusable="false">
+      <defs>
+        <radialGradient id="spGlow"><stop offset="0" stop-color="#c9b8ff" stop-opacity=".95"/><stop offset=".35" stop-color="#9b7cf5" stop-opacity=".55"/><stop offset="1" stop-color="#7c5cf0" stop-opacity="0"/></radialGradient>
+      </defs>
+      <g id="spTrail"></g>
+      <circle id="spHeadGlow" r="46" fill="url(#spGlow)" opacity="0"/>
+      <circle id="spHead" r="10" fill="#f1ecff" opacity="0"/>
+      <circle class="sp-ring" cx="362" cy="730" r="32" fill="none" stroke="#c9b8ff" stroke-width="5"/>
+    </svg>
+  </div>
+</div>
+
 <div id="app">
   <div style="min-height:100vh;display:flex;align-items:center;justify-content:center">
     <div class="spinner"></div>
@@ -420,6 +451,68 @@ mjx-container{color:var(--text) !important}
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
   📲 Install App
 </button>
+
+<script>
+/* Startup splash controller. Pure UI: no Firebase, no auth, no storage writes, nothing the app reads.
+   Lasts ~2.8 s, then fades out once the app has rendered its first real screen (login or dashboard).
+   A browser refresh (navigation type "reload") skips it, so a student reloading mid-test is never delayed. */
+(function(){
+  var sp = document.getElementById('tmsSplash'); if(!sp) return;
+  var nav = ''; try{ nav = (performance.getEntriesByType('navigation')[0] || {}).type || ''; }catch(e){}
+  if(nav === 'reload'){ sp.parentNode.removeChild(sp); return; }
+  var reduce = false; try{ reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
+  var app = document.getElementById('app'), img = sp.querySelector('.sp-img');
+  var MIN = reduce ? 1200 : 2800, MAX = 9000, pageT0 = performance.now(), t0 = 0, started = false, closing = false, raf = 0;
+  /* middle orbit of the supplied artwork, in the artwork's own pixel space (fitted from the PNG) */
+  var CX = 624.1, CY = 678.3, A = 339.7, B = 85.4, T_START = Math.atan2((730 - CY) / B, (362 - CX) / A);
+  var LAP_DELAY = 550, LAP_MS = 1700, TAIL = 9;
+  var head = document.getElementById('spHead'), glow = document.getElementById('spHeadGlow'), trail = document.getElementById('spTrail'), dots = [];
+  for(var i = 0; i < TAIL; i++){
+    var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('fill', '#b9a4ff'); c.setAttribute('opacity', '0'); trail.appendChild(c); dots.push(c);
+  }
+  function ease(x){ return x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3) / 2; }
+  function pos(t){ return [CX + A * Math.cos(t), CY + B * Math.sin(t)]; }
+  function place(el, p, r, o){ el.setAttribute('cx', p[0].toFixed(1)); el.setAttribute('cy', p[1].toFixed(1)); if(r) el.setAttribute('r', r); el.setAttribute('opacity', o); }
+  function frame(now){
+    var k = (now - t0 - LAP_DELAY) / LAP_MS;
+    if(k < 0){ raf = requestAnimationFrame(frame); return; }
+    if(k >= 1){
+      [head, glow].forEach(function(n){ n.setAttribute('opacity', 0); }); dots.forEach(function(d){ d.setAttribute('opacity', 0); });
+      sp.classList.add('sp-merge'); return;   // the spark ends exactly on the logo's own electron
+    }
+    var fade = k < .12 ? k / .12 : k > .88 ? (1 - k) / .12 : 1;
+    var p = pos(T_START + ease(k) * 2 * Math.PI);
+    place(glow, p, 46, .9 * fade); place(head, p, 10, fade);
+    for(var j = 0; j < TAIL; j++){
+      var kk = Math.max(0, k - (j + 1) * .018);
+      place(dots[j], pos(T_START + ease(kk) * 2 * Math.PI), 8 - j * .7, (.5 - j * .05) * fade);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  function isReady(){
+    var f = app && app.firstElementChild;
+    return !!f && !(f.firstElementChild && f.firstElementChild.classList.contains('spinner') && f.children.length === 1);
+  }
+  function close(){
+    if(closing) return; closing = true; if(raf) cancelAnimationFrame(raf);
+    sp.classList.add('sp-out'); setTimeout(function(){ if(sp.parentNode) sp.parentNode.removeChild(sp); }, 700);
+  }
+  function check(){
+    var now = performance.now();
+    if(started && now - t0 >= MIN && isReady()) close();
+    else if(now - pageT0 >= MAX) close();
+  }
+  function go(){
+    if(started) return; started = true; t0 = performance.now(); sp.classList.add('sp-go');
+    if(!reduce) raf = requestAnimationFrame(frame);
+    setTimeout(check, MIN + 20);
+  }
+  if(app && window.MutationObserver) new MutationObserver(check).observe(app, { childList: true });
+  setInterval(function(){ if(!closing) check(); }, 400);   // safety net if a render happens without a DOM mutation we can see
+  if(img && !img.complete){ img.addEventListener('load', go); img.addEventListener('error', go); setTimeout(go, 1500); } else go();
+})();
+</script>
 
 <script>
 /* ================================================================
@@ -678,40 +771,14 @@ function getDeviceId(){
 /* ================================================================
    3) LOGO
    ----------------------------------------------------------------
-   Hand-built inline SVG approximating the Atomic Minds mark (atom
-   orbits + bold "A" + brain in the counter + electron dot) so the
-   app needs zero image assets to look on-brand.
-
-   >>> If you want a pixel-perfect match to your real PNG logo,
-   >>> just replace the whole buildLogo() return value with:
-   >>>   `<img src="logo.png" alt="Atomic Minds" style="width:${size}px;height:${size}px">`
-   >>> and drop your logo.png next to this index.html file.
+   The supplied Atomic Minds artwork (logo.png: A + brain + orbits + electron),
+   shown as-is at the requested size. Nothing is drawn or approximated here;
+   the name and tagline next to it stay as text because the supplied artwork
+   contains the emblem only.
    ================================================================ */
 function buildLogo(size){
   size = size || 64;
-  return `<svg class="logo-mark" width="${size}" height="${size}" viewBox="0 0 100 100" aria-hidden="true">
-    <g stroke="#9b8ce8" stroke-width="2.2" fill="none" opacity=".9">
-      <ellipse cx="50" cy="52" rx="40" ry="16"/>
-      <ellipse cx="50" cy="52" rx="40" ry="16" transform="rotate(60 50 52)"/>
-      <ellipse cx="50" cy="52" rx="40" ry="16" transform="rotate(120 50 52)"/>
-    </g>
-    <circle cx="15" cy="70" r="3.4" fill="#9b8ce8"/>
-    <g stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none">
-      <path d="M50,14 L19,88"/>
-      <path d="M50,14 L81,88"/>
-    </g>
-    <g fill="#c3b8f5">
-      <path d="M50,37 C44,35 38,37 35,42 C32,47 33,53 37,57 C40,60 45,61 50,59 Z"/>
-      <path d="M50,37 C56,35 62,37 65,42 C68,47 67,53 63,57 C60,60 55,61 50,59 Z"/>
-    </g>
-    <g stroke="#150a1f" stroke-width="1.1" fill="none" stroke-linecap="round">
-      <path d="M50,38 L50,59"/>
-      <path d="M40,45 Q43,47 41,51"/>
-      <path d="M44,41 Q46,44 44,48"/>
-      <path d="M60,45 Q57,47 59,51"/>
-      <path d="M56,41 Q54,44 56,48"/>
-    </g>
-  </svg>`;
+  return `<img class="logo-mark" src="logo.png" width="${size}" height="${size}" alt="" aria-hidden="true" draggable="false">`;
 }
 
 /* ================================================================
