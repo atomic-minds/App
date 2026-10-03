@@ -239,16 +239,9 @@ select:focus{border-color:var(--accent)}
 .admin-header{position:sticky;top:0;z-index:20;background:rgba(18,8,28,.96);border-bottom:1px solid var(--border-soft);
   padding:12px 16px}
 .admin-header-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.admin-tabs{display:flex;gap:4px;overflow-x:auto;padding-bottom:2px}
-.admin-tab{padding:7px 13px;border:1px solid var(--border);background:var(--surface-2);border-radius:20px;
-  font-size:13px;font-weight:600;color:var(--text-dim);white-space:nowrap}
-.admin-tab.active{background:rgba(155,140,232,.18);color:var(--accent);border-color:var(--accent)}
 .admin-content{flex:1;padding:16px;max-width:560px;margin:0 auto;width:100%}
 
 /* -------- rich content (MathJax / images / svg) -------- */
-.rich-content{font-size:15px;line-height:1.7;color:var(--text)}
-.rich-content img{border-radius:8px;margin:8px 0;display:block}
-.rich-content svg{max-width:100%}
 mjx-container{color:var(--text) !important}
 
 /* -------- item lists reused across tabs -------- */
@@ -353,7 +346,6 @@ mjx-container{color:var(--text) !important}
 .drawer-item .di-badge{margin-left:auto;background:var(--danger-bg);color:var(--danger);font-size:11px;
   font-weight:700;padding:2px 7px;border-radius:20px}
 .drawer-divider{height:1px;background:var(--border-soft);margin:8px 4px}
-.drawer-footer{margin-top:auto;padding-top:10px}
 
 /* -------- admin home grid dashboard -------- */
 .home-welcome{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
@@ -373,10 +365,6 @@ mjx-container{color:var(--text) !important}
   font-size:11px;font-weight:700;padding:2px 7px;border-radius:20px}
 
 /* -------- upgrade request UI -------- */
-.upgrade-banner{background:linear-gradient(135deg,rgba(155,140,232,.18),rgba(127,119,221,.08));
-  border:1px solid var(--accent);border-radius:var(--radius-lg);padding:14px;margin-bottom:12px;text-align:center}
-.upgrade-pending{background:var(--warning-bg);border:1px solid var(--warning-brd);color:var(--warning);
-  border-radius:var(--radius);padding:10px 12px;font-size:13.5px;text-align:center;margin-bottom:12px}
 
 /* -------- batches & enrollments -------- */
 .batch-card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
@@ -782,18 +770,6 @@ function closeDrawer(){
   window.__amDrawerOverlay = null;
 }
 
-/* Renders text that may contain LaTeX ($...$), raw <img>, or raw <svg>.
-   Used for every question, solution, note description, admin note, etc.
-   A light allow-list strips <script> tags but keeps img/svg/formatting
-   so admin can paste chemistry structure images or hand-drawn SVGs. */
-function renderRich(container, raw){
-  if(!raw){ container.innerHTML=''; return; }
-  const cleaned = String(raw).replace(/<script[\s\S]*?<\/script>/gi,'');
-  container.innerHTML = cleaned;
-  if(window.MathJax && window.MathJax.typesetPromise){
-    window.MathJax.typesetPromise([container]).catch(()=>{});
-  }
-}
 
 /* A random ID generated once per browser/device and stored in localStorage,
    used to identify "this browser" to the active-session system below (see
@@ -1860,7 +1836,6 @@ function renderStudentShell(){
 }
 
 function openStudentDrawer(){
-  const p = CURRENT_PROFILE;
   openDrawer(BRAND.name, [
     { key:'dashboard', icon:icon('home'), label:'Dashboard', onSelect:()=>{ STATE.studentTab='dashboard'; renderScreen(); } },
     { key:'classes', icon:icon('video'), label:'Classes', onSelect:()=>{ STATE.studentTab='classes'; renderScreen(); } },
@@ -7068,9 +7043,8 @@ async function adminDeleteTestHistory(t, studentId){
   return { attempts, results };
 }
 
-/* ---------- Results — shared data + render, used by BOTH the per-test sheet (openTestResults)
-   and the central Admin → Tests → Results tab, so results are never fetched or rendered by two
-   different code paths. loadTestResultsGroups() does the one-time fetch (no listener — the caller
+/* ---------- Results — shared data + render, used by the central Admin → Tests → Results tab,
+   so results are never fetched or rendered by two different code paths. loadTestResultsGroups() does the one-time fetch (no listener — the caller
    decides when to reload, e.g. after Delete History); renderTestResultGroups() paints whatever
    groups it's given into any container, with an optional client-side nameFilter (no new query). ---------- */
 async function loadTestResultsGroups(testId){
@@ -7283,27 +7257,6 @@ function renderTestAnalytics(box, t, groups){
   box.innerHTML = html;
 }
 
-function openTestResults(t){
-  const batchLbl = t.batchId === GENERAL_BATCH_ID ? 'Free Demo' : (t.batchName || t.batch || '');
-  const overlay = el(`<div class="overlay open"><div class="sheet">
-    <div class="sheet-handle"></div><button class="sheet-close" id="closeRes">✕</button><div style="clear:both"></div>
-    <div class="card-title">📊 ${esc(t.title)} — results</div>
-    ${batchLbl ? `<div class="item-meta" style="margin:-8px 0 10px">${esc(batchLbl)}</div>` : ''}
-    <div id="resList"><div class="spinner"></div></div>
-  </div></div>`);
-  document.body.appendChild(overlay);
-  $('#closeRes', overlay).addEventListener('click', ()=> overlay.remove());
-  const box = $('#resList', overlay);
-
-  async function load(){
-    box.innerHTML = '<div class="spinner"></div>';
-    let groups;
-    try{ groups = await loadTestResultsGroups(t.id); }
-    catch(e){ console.error(e); box.innerHTML = '<div class="empty-state">Could not load results.</div>'; return; }
-    renderTestResultGroups(box, t, groups, { onReload: load });
-  }
-  load();
-}
 
 function drawManualBuilder(body, onPublished){
   let questions = [];
@@ -7984,41 +7937,6 @@ function drawTextGenerator(body, onPublished){
   });
 }
 
-function drawPasteForm(body){
-  body.appendChild(el(`
-    <div class="card">
-      <div class="card-title">📋 Paste an HTML test</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
-        Ask Claude (in a separate chat) to write a complete self-contained HTML test file — or use one you built yourself.
-        It must call <code style="background:var(--surface-2);padding:1px 5px;border-radius:4px">window.parent.postMessage({type:'submit_test',score,total},'*')</code> on submit so the score saves here.
-      </div>
-      <div class="field"><label>Title</label><input id="pTitle" placeholder="Full Test - 01"></div>
-      <div class="row2">
-        <div class="field"><label>Subject</label><input id="pSubject" placeholder="Physics"></div>
-        <div class="field"><label>Batch</label><select id="pBatch"><option value="">Select batch...</option></select></div>
-      </div>
-      <div class="field"><label>Type</label><select id="pType"><option value="live">🔴 Live</option><option value="selfpaced">⏱ Regular</option><option value="practice" selected>📚 Practice</option></select></div>
-      <div class="field"><label>Paste full HTML code</label><textarea id="pHtml" style="min-height:130px;font-family:monospace;font-size:11px"></textarea></div>
-      <button class="btn btn-primary" id="publishPaste">🚀 Publish to Firebase</button>
-    </div>`));
-  loadActiveBatchesInto($('#pBatch', body));
-  $('#publishPaste',body).addEventListener('click', async ()=>{
-    const title = $('#pTitle',body).value.trim();
-    const html = $('#pHtml',body).value.trim();
-    const batchSel = $('#pBatch',body);
-    const batchId = batchSel.value;
-    if(!title || !html){ toast('Fill title and paste HTML'); return; }
-    if(!batchId){ toast('Select a batch'); return; }
-    const batchName = batchId === GENERAL_BATCH_ID ? 'Free Demo' : batchSel.selectedOptions[0].textContent;
-    await db.collection(COL.tests).add({
-      title, subject: $('#pSubject',body).value.trim(), batchId, batchName,
-      type: $('#pType',body).value, htmlContent: html, source: 'pasted',
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    toast('✅ Published to Firebase!');
-    $('#pTitle',body).value=''; $('#pHtml',body).value=''; batchSel.value='';
-  });
-}
 
 function renderAdminNotes(container){
   let sub = 'published', teardown = null; // published | add
@@ -8400,7 +8318,7 @@ function renderAdminCalendar(container){
   loadActiveBatchesInto($('#schBatch', container));
 
   let editingId = null, editingEntry = null;       // one-time classSchedules doc being edited
-  let editingRuleId = null, editingRule = null;     // classScheduleRules doc being edited
+  let editingRuleId = null;                         // classScheduleRules doc being edited
   let scheduleType = 'onetime';                     // 'onetime' | 'recurring' — which form is active
 
   function setScheduleType(type){
@@ -8417,7 +8335,7 @@ function renderAdminCalendar(container){
 
   function resetSchForm(){
     editingId = null; editingEntry = null;
-    editingRuleId = null; editingRule = null;
+    editingRuleId = null;
     $('#schFormTitle', container).textContent = '📅 New class';
     ['schDate','schType','schStart','schEnd','schTitle','schTopic','schTeacher','schRuleStart','schRuleEnd','schRuleType']
       .forEach(id=> $('#'+id,container).value='');
@@ -8700,7 +8618,7 @@ function renderAdminCalendar(container){
 
       $('[data-act="edit"]', card).addEventListener('click', ()=>{
         resetSchForm();
-        editingRuleId = r.id; editingRule = r;
+        editingRuleId = r.id;
         setScheduleType('recurring');
         $('#schFormTitle', container).textContent = '✏️ Edit recurring schedule';
         $('#schBatch', container).value = r.batchId||'';
