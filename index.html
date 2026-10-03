@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="app-lock">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
@@ -83,6 +83,10 @@ button{cursor:pointer;appearance:none;-webkit-appearance:none;background-image:n
 button,.bottom-nav,.tab-filter,.filter-toolbar,.item-actions,.tap-card,.batch-card{
   user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
 }
+/* Copy lock (see APP-LIKE BEHAVIOUR in the script): no selection / long-press callout anywhere except form fields. Lifted on admin screens. */
+html.app-lock,html.app-lock *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html.app-lock input,html.app-lock textarea,html.app-lock select,html.app-lock [contenteditable="true"]{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+html.app-lock img{-webkit-user-drag:none}
 svg{vertical-align:middle;flex-shrink:0}
 a{color:var(--accent)}
 img{max-width:100%}
@@ -220,8 +224,12 @@ select:focus{border-color:var(--accent)}
 .content-area{flex:1;padding:16px;padding-bottom:90px;max-width:480px;margin:0 auto;width:100%}
 .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:rgba(28,16,48,.97);backdrop-filter:blur(10px);
   border-top:1px solid var(--border-soft);display:flex;z-index:30;max-width:480px;margin:0 auto}
-.bottom-nav button{flex:1;background:none;border:none;padding:9px 2px 8px;display:flex;flex-direction:column;
+.bottom-nav button{flex:1 1 auto;min-width:0;background:none;border:none;padding:9px 2px 8px;display:flex;flex-direction:column;
   align-items:center;gap:3px;color:var(--text-dim);font-size:11px;font-weight:500}
+/* Each tab is as wide as its own label and the spare room is shared out equally, so the WHITE SPACE between neighbouring tabs is identical.
+   (Before: flex:1 gave every tab the same base width, but "Announcements" is wider than that, so it grabbed extra room and left
+   Classes / Tests / Notes with visibly uneven gaps.) Taps still cover the full bar width — there are no dead zones between tabs. */
+.bottom-nav .bn-label{display:block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bottom-nav button.active{color:var(--accent)}
 .bottom-nav .bn-icon{display:flex;align-items:center;justify-content:center}
 .bottom-nav .bn-icon svg{width:20px;height:20px}
@@ -846,6 +854,111 @@ const STATE = {
   testResultCache: {}
 };
 
+/* ================================================================
+   APP-LIKE BEHAVIOUR — copy lock + Android/browser Back button
+   ----------------------------------------------------------------
+   (1) Copy lock: text can't be selected or copied anywhere a student/guest sees (inputs and textareas still work).
+       The lock is the `app-lock` class on <html>; it is lifted only on the admin screens, where copying phone numbers,
+       links and IDs is part of the job. This is a UX lock, not security — a determined user can still screenshot or retype.
+   (2) Back button: ONE layered model drives history. A history entry is kept for "the app" (1), for an open non-home tab (+1)
+       and for every open overlay / sheet / drawer / player (+1 each). Back therefore closes the top layer, else leaves the tab
+       for the Dashboard / admin home, else asks "press back again to exit". It reconciles to that model instead of tracking
+       individual pushes, so overlapping open/close calls cannot desynchronise it. While a test attempt is running, the test
+       runner's own guard (TMS_ACTIVE) keeps full control and this module stays out of the way.
+   ================================================================ */
+(function(){
+  const root = document.documentElement;
+  const isEditable = t => { const e = t && t.nodeType === 3 ? t.parentElement : t; return !!(e && e.closest && e.closest('input,textarea,select,[contenteditable=""],[contenteditable="true"]')); };
+  const locked = () => root.classList.contains('app-lock');
+  ['copy', 'cut'].forEach(ev => document.addEventListener(ev, e => {
+    if(locked() && !isEditable(e.target)){ e.preventDefault(); try{ e.clipboardData && e.clipboardData.setData('text/plain', ''); }catch(_){} }
+  }, true));
+  document.addEventListener('selectstart', e => { if(locked() && !isEditable(e.target)) e.preventDefault(); }, true);
+  document.addEventListener('dragstart', e => { if(locked() && !isEditable(e.target)) e.preventDefault(); }, true);
+})();
+
+const TMS_NAV = (function(){
+  const layers = [];                 // body-level overlays currently attached, oldest first
+  let inTab = false, busy = false, busyTimer = 0, sched = false, tries = 0, exitUntil = 0, exiting = false;
+  const isLayer = n => !!n && n.nodeType === 1 && (n.classList.contains('overlay') || n.classList.contains('drawer-overlay'));
+  const stateN = () => { const s = history.state; return (s && s.tms === 1 && typeof s.n === 'number') ? s.n : null; };
+  const want = () => 1 + (inTab ? 1 : 0) + layers.length;
+  const userActive = () => { try{ return navigator.userActivation ? navigator.userActivation.hasBeenActive : true; }catch(e){ return true; } };
+  const blocked = () => !!TMS_ACTIVE || !!(history.state && history.state.tmsGuard) || exiting || busy;
+
+  function schedule(){ if(sched) return; sched = true; setTimeout(reconcile, 0); }
+  function retry(){ if(tries++ < 25) setTimeout(()=>{ sched = false; schedule(); }, 150); }
+
+  function reconcile(){
+    sched = false;
+    if(blocked()){ retry(); return; }
+    tries = 0;
+    let cur = stateN();
+    if(cur === null){ try{ history.replaceState({ tms:1, n:0 }, '', location.href); cur = 0; }catch(e){ return; } }   // adopt the current entry as the base
+    const w = want();
+    if(cur < w){
+      if(!userActive()) return;      // Chrome ignores history entries a page adds before any tap; wait for the first touch
+      try{ for(let k = cur + 1; k <= w; k++) history.pushState({ tms:1, n:k }, '', location.href); }catch(e){}
+    } else if(cur > w){
+      busy = true; clearTimeout(busyTimer); busyTimer = setTimeout(()=>{ busy = false; schedule(); }, 600);
+      try{ history.go(-(cur - w)); }catch(e){ busy = false; }
+    }
+  }
+
+  function closeLayer(node){
+    if(node.classList.contains('drawer-overlay')){ try{ closeDrawer(); }catch(e){} return; }
+    if(node.classList.contains('tms-active')) return;
+    const btn = node.querySelector('[data-no],[data-close],.sheet-close,#closePlayer,#closeTest,#closePdf,#closeRes,#eClose,#closeBatch,#closeDetail,#hubClose');
+    if(btn && !btn.disabled){ btn.click(); return; }
+    node.dispatchEvent(new MouseEvent('click', { bubbles:true }));     // backdrop-style close
+    setTimeout(()=>{ if(document.body.contains(node)) node.remove(); }, 250);   // sheets with no close control at all
+  }
+
+  function onBack(){
+    if(layers.length){ closeLayer(layers[layers.length - 1]); return; }
+    if(inTab){
+      if(STATE.screen === 'student') STATE.studentTab = 'dashboard'; else if(STATE.screen === 'admin') STATE.adminTab = 'home';
+      renderScreen(); return;
+    }
+    const now = Date.now();
+    if(now < exitUntil){                         // second Back within 2 s → really leave
+      exiting = true; setTimeout(()=>{ exiting = false; schedule(); }, 800);
+      try{ history.back(); }catch(e){}
+      return;
+    }
+    exitUntil = now + 2000; toast('Press back again to exit');
+  }
+
+  window.addEventListener('popstate', ()=>{
+    if(busy){ busy = false; clearTimeout(busyTimer); schedule(); return; }   // our own traversal landed
+    if(TMS_ACTIVE) return;                                                  // a running test owns Back
+    const n = stateN(); if(n === null) return;                              // not one of ours (e.g. the test guard)
+    if(n < want()) onBack();
+    schedule();
+  });
+
+  new MutationObserver(muts => {
+    let changed = false;
+    muts.forEach(m => {
+      m.addedNodes.forEach(n => { if(isLayer(n) && layers.indexOf(n) < 0){ layers.push(n); changed = true; } });
+      m.removedNodes.forEach(n => { const i = layers.indexOf(n); if(i >= 0){ layers.splice(i, 1); changed = true; } });
+    });
+    if(changed) schedule();
+  }).observe(document.body, { childList:true });
+  document.querySelectorAll('body > .overlay, body > .drawer-overlay').forEach(n => layers.push(n));
+  document.addEventListener('pointerdown', ()=> schedule(), { capture:true, once:true });   // first tap unlocks history entries
+  schedule();
+
+  return { setTab(v){ if(inTab !== v){ inTab = v; schedule(); } } };
+})();
+
+/* Called at the end of every renderScreen(): keeps the history model and the copy lock in step with what is on screen. */
+function tmsNavSync(){
+  const s = STATE.screen;
+  TMS_NAV.setTab(s === 'student' ? STATE.studentTab !== 'dashboard' : s === 'admin' ? STATE.adminTab !== 'home' : false);
+  document.documentElement.classList.toggle('app-lock', s !== 'admin');
+}
+
 function renderScreen(){
   if(typeof clearUnsubs === 'function') clearUnsubs();
   const app = $('#app');
@@ -878,6 +991,7 @@ function renderScreen(){
     const rb = $('#recoverReloadBtn', app);
     if(rb) rb.addEventListener('click', ()=> location.reload());
   }
+  tmsNavSync();
 }
 
 /* ================================================================
@@ -1720,11 +1834,11 @@ function renderStudentShell(){
     </div>
     <div class="content-area" id="studentContent"></div>
     <div class="bottom-nav" id="studentNav">
-      <button data-tab="dashboard"><span class="bn-icon">${icon('home')}</span>Dashboard</button>
-      <button data-tab="classes"><span class="bn-icon">${icon('video')}</span>Classes</button>
-      <button data-tab="tests"><span class="bn-icon">${icon('clipboard')}</span>Tests</button>
-      <button data-tab="notes"><span class="bn-icon">${icon('file')}</span>Notes</button>
-      <button data-tab="announcements"><span class="bn-icon">${icon('megaphone')}</span>Announcements</button>
+      <button data-tab="dashboard"><span class="bn-icon">${icon('home')}</span><span class="bn-label">Dashboard</span></button>
+      <button data-tab="classes"><span class="bn-icon">${icon('video')}</span><span class="bn-label">Classes</span></button>
+      <button data-tab="tests"><span class="bn-icon">${icon('clipboard')}</span><span class="bn-label">Tests</span></button>
+      <button data-tab="notes"><span class="bn-icon">${icon('file')}</span><span class="bn-label">Notes</span></button>
+      <button data-tab="announcements"><span class="bn-icon">${icon('megaphone')}</span><span class="bn-label">Announcements</span></button>
     </div>
   </div>`);
   $('#studentHamburger', shell).addEventListener('click', ()=> openStudentDrawer());
@@ -4412,6 +4526,9 @@ const TMS_PLAYER_CSS = `
    (overflow-x:hidden on body made it one, and overscroll-behavior on it then blocked scrolling entirely),
    so horizontal overflow is clipped without creating a scroll container and content is kept inside the width. */
 html{overscroll-behavior-y:contain}
+*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+input,textarea{-webkit-user-select:text;user-select:text}
+img{-webkit-user-drag:none}
 body{overflow-x:clip;font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;font-size:14px;overflow-wrap:break-word}
 @supports not (overflow-x:clip){body{overflow-x:hidden}}
 img,svg,video,canvas{max-width:100%}
@@ -5146,6 +5263,7 @@ function buildTestHTML(meta, questions, boot){
 <style>${TMS_PLAYER_CSS}</style></head>
 <body oncontextmenu="return false">
 ${TMS_PLAYER_BODY}
+<script>['copy','cut','selectstart','dragstart'].forEach(function(ev){document.addEventListener(ev,function(e){var t=e.target&&e.target.nodeType===3?e.target.parentElement:e.target;if(t&&t.closest&&t.closest('input,textarea'))return;e.preventDefault();},true);});<\/script>
 <script>
 const QUESTIONS = ${qData};
 const CORRECT_MARK = ${correctMark}, WRONG_MARK = ${wrongMark};
@@ -8632,7 +8750,7 @@ function renderAdminCalendar(container){
     if(u.searchParams.get('open') === 'announcements'){
       STATE.studentTab = 'announcements';   // used once the student session is up (or right after they sign in)
       u.searchParams.delete('open');
-      history.replaceState(null, '', u.pathname + u.search + u.hash);
+      history.replaceState(history.state, '', u.pathname + u.search + u.hash);
     }
   }catch(e){}
   if(!('serviceWorker' in navigator)) return;
