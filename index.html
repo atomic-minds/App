@@ -182,19 +182,21 @@ select:focus{border-color:var(--accent)}
 @media (prefers-reduced-motion:reduce){#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}}   /* only the halo pulse is dropped; the zoom and the spark still play (short, under 3 s) */
 .brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
 /* soft violet glow behind the emblem on the two login screens (the logo img stays unwrapped-in-isolation so its lighten blend still sees the glow + card) */
-.logo-glow{position:relative;display:flex;justify-content:center;width:100%}
-.logo-glow::before{content:"";position:absolute;left:50%;top:50%;width:210px;height:170px;transform:translate(-50%,-50%);border-radius:50%;
-  background:radial-gradient(closest-side,rgba(139,109,240,.5) 0%,rgba(139,109,240,.26) 42%,rgba(139,109,240,0) 100%);pointer-events:none;animation:logoGlow 3.6s ease-in-out infinite alternate}
+.logo-glow{position:relative;display:block;line-height:0}
+/* Premium login finish: the glow is a blurred copy of the supplied logo itself, so it hugs the emblem's real shape (A + orbits) instead of being a flat blob.
+   lighten blend = the artwork's flat dark backdrop never shows against the card. Static for reduce-motion users. */
+.logo-glow::before{content:"";position:absolute;inset:0;transform:scale(1.22);background:url(logo.png) center/contain no-repeat;
+  filter:blur(9px) saturate(1.8);opacity:.6;mix-blend-mode:lighten;pointer-events:none;animation:logoBreath 5.5s ease-in-out infinite alternate}
 .logo-glow .logo-mark,.brand-row .brand-name,.brand-row .brand-tagline{position:relative}   /* paint above the glow */
-@keyframes logoGlow{from{opacity:.6}to{opacity:1}}
-@media (prefers-reduced-motion:reduce){.logo-glow::before{animation:none;opacity:.85}}
+@keyframes logoBreath{from{opacity:.48}to{opacity:.72}}
+@media (prefers-reduced-motion:reduce){.logo-glow::before{animation:none;opacity:.6}}
 .brand-name{font-size:22px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
 .brand-tagline{font-size:13px;color:var(--text-muted);margin-top:2px}
 
 /* -------- auth screens -------- */
 .auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 16px}
-.auth-card{width:100%;max-width:360px;background:var(--surface);border:1px solid var(--border-soft);
-  border-radius:20px;padding:28px 22px}
+.auth-card{width:100%;max-width:360px;background:radial-gradient(120% 46% at 50% 0%,rgba(124,92,240,.15),rgba(124,92,240,0) 70%),var(--surface);border:1px solid var(--border-soft);
+  border-radius:20px;padding:28px 22px;box-shadow:0 28px 60px -30px rgba(0,0,0,.75),inset 0 1px 0 rgba(190,170,255,.07)}
 .auth-tabs{display:flex;gap:4px;padding:4px;background:var(--bg);border-radius:12px;margin:22px 0 18px}
 .auth-tab{flex:1;padding:9px 4px;border:none;background:none;border-radius:9px;font-size:14px;font-weight:600;
   color:var(--text-dim);transition:all .15s}
@@ -887,7 +889,7 @@ function renderAuthScreen(){
 
   card.appendChild(el(`
     <div class="brand-row">
-      <div class="logo-glow">${buildLogo(64)}</div>
+      <div class="logo-glow">${buildLogo(84)}</div>
       <div class="brand-name">${BRAND.name}</div>
       <div class="brand-tagline">${BRAND.tagline}</div>
     </div>
@@ -1057,7 +1059,7 @@ function renderAdminLoginScreen(){
   const card = $('.auth-card', wrap);
   card.appendChild(el(`
     <div class="brand-row">
-      <div class="logo-glow">${buildLogo(56)}</div>
+      <div class="logo-glow">${buildLogo(72)}</div>
       <div class="brand-name" style="font-size:17px">${BRAND.name} · Admin</div>
       <div class="brand-tagline">Teacher &amp; owner panel</div>
     </div>
