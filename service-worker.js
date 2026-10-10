@@ -8,7 +8,7 @@
 // resilience. Firebase, Firestore's realtime channel, Google Drive,
 // YouTube, and MathJax's CDN are never touched by this file at all.
 
-const CACHE_NAME = 'atomic-minds-v12'; // v12: manifest background colour now matches the new icon (bump so installed copies drop the cached manifest)
+const CACHE_NAME = 'atomic-minds-v13'; // v13: styles.css / tms-player.js split out of index.html and always fetched fresh (see isAppCode below); bump wipes caches that older workers filled. v12: manifest background colour now matches the new icon
 const STATIC_ASSETS = ['./manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -87,6 +87,17 @@ self.addEventListener('fetch', (event) => {
         { headers: { 'Content-Type': 'text/html' } }
       ))
     );
+    return;
+  }
+
+  // App code that index.html loads (styles.css, tms-player.js, any future .js/.css split out of it) must
+  // behave like the app shell: ALWAYS revalidated with the network, never served from this worker's cache,
+  // otherwise a deployment would show new HTML with stale CSS/JS. cache:'no-cache' also bypasses the
+  // browser's own HTTP cache freshness window (a cheap 304 when nothing changed). The worker script
+  // itself is excluded (the browser updates it on its own, outside this handler).
+  const isAppCode = /\.(css|js)$/.test(url.pathname) && !url.pathname.endsWith('service-worker.js');
+  if (isAppCode) {
+    event.respondWith(fetch(req, { cache: 'no-cache' }));
     return;
   }
 

@@ -1,0 +1,528 @@
+/* Atomic Minds — app stylesheet (moved verbatim out of index.html; edit here). */
+/* ============================================================
+   ATOMIC MINDS THEME
+   Deep purple / near-black, matching the atom+brain brand mark.
+   System font stack on purpose — no webfont download, since many
+   students are on slow mobile data (seen in your screenshots).
+   ============================================================ */
+:root{
+  color-scheme: dark;
+  --bg:#12081c;
+  --surface:#1c1030;
+  --surface-2:#241539;
+  --border:#3a2a5c;
+  --border-soft:#2a1d47;
+  --accent:#9b8ce8;
+  --accent-bright:#7f77dd;
+  --text:#f3f0fa;
+  --text-muted:#a89ae0;
+  --text-dim:#7a6da8;
+  --success:#4ade80; --success-bg:rgba(34,197,94,.15); --success-brd:rgba(34,197,94,.35);
+  --danger:#f87171;  --danger-bg:rgba(239,68,68,.15);  --danger-brd:rgba(239,68,68,.35);
+  --warning:#fbbf24; --warning-bg:rgba(245,158,11,.15); --warning-brd:rgba(245,158,11,.35);
+  --radius:10px;
+  --radius-lg:16px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--font);
+  -webkit-tap-highlight-color:transparent;}
+body{min-height:100vh;font-size:16px;line-height:1.5}
+button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
+button{cursor:pointer;appearance:none;-webkit-appearance:none;background-image:none;box-shadow:none;line-height:1.2}
+/* App-like mobile UX (Part I): buttons, nav, tab chips, toolbars and action rows are pure
+   controls with no prose worth copying, so a long-press there should never pop a text-selection
+   handle. Deliberately scoped — normal readable content (question text, notes/announcement
+   bodies, explanations) is untouched and stays selectable, same as plain text anywhere else. */
+button,.bottom-nav,.tab-filter,.filter-toolbar,.item-actions,.tap-card,.batch-card{
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+}
+/* Copy lock (see APP-LIKE BEHAVIOUR in the script): no selection / long-press callout anywhere except form fields. Lifted on admin screens. */
+html.app-lock,html.app-lock *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html.app-lock input,html.app-lock textarea,html.app-lock select,html.app-lock [contenteditable="true"]{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+html.app-lock img{-webkit-user-drag:none}
+svg{vertical-align:middle;flex-shrink:0}
+a{color:var(--accent)}
+img{max-width:100%}
+::selection{background:var(--accent-bright);color:#fff}
+
+#app{min-height:100vh;display:flex;flex-direction:column}
+
+/* -------- shared building blocks -------- */
+.container{max-width:480px;margin:0 auto;width:100%;padding:0 16px}
+.card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);padding:16px;margin-bottom:12px}
+.card-title{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--text)}
+.card-title svg{width:18px;height:18px;flex-shrink:0;color:var(--accent)}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:13px;color:var(--text-muted);margin-bottom:5px;font-weight:500}
+.field input,.field select,.field textarea{
+  width:100%;padding:10px 12px;border-radius:var(--radius);
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);outline:none;
+}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:80px;font-family:inherit}
+.field .hint{font-size:12px;color:var(--text-dim);margin-top:4px}
+.row2{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+
+/* -------- standalone filter selects (Tests library filters, outside .field) -------- */
+select{width:100%;padding:9px 10px;border-radius:var(--radius);background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text);outline:none}
+select:focus{border-color:var(--accent)}
+.filter-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.count{font-size:12px;color:var(--text-dim)}
+
+/* ---- Admin Results → Analytics ---- */
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:6px}
+.stat-tile{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;text-align:center}
+.stat-val{font-size:18px;font-weight:800;color:var(--text)}
+.stat-lbl{font-size:11px;color:var(--text-dim);margin-top:2px}
+.q-stat-card{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.q-stat-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.q-stat-num{font-size:13px;font-weight:700}
+.q-stat-flag{font-size:10px;font-weight:700;color:var(--warning);margin-left:6px}
+.q-stat-pct{font-size:12px;font-weight:700;color:var(--text-dim);white-space:nowrap}
+.q-stat-preview{font-size:12px;color:var(--text-dim);margin:4px 0 8px;line-height:1.4}
+.q-stat-bar{height:6px;border-radius:4px;background:var(--danger-bg);overflow:hidden;margin-bottom:6px}
+.q-stat-bar-fill{height:100%;background:var(--success);border-radius:4px}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;width:100%;
+  padding:11px;border-radius:var(--radius);border:1px solid transparent;font-size:15px;font-weight:600;}
+.btn-sm{width:auto;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  border:1px solid transparent;padding:6px 12px;font-size:13px;font-weight:500;border-radius:8px}
+.btn-primary{background:var(--accent-bright);color:#150a1f}
+.btn-primary:hover{opacity:.92}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-ghost{background:var(--surface-2);color:var(--text-muted);border-color:var(--border)}
+.btn-danger{background:var(--danger-bg);color:var(--danger);border-color:var(--danger-brd)}
+.btn-success{background:var(--success-bg);color:var(--success);border-color:var(--success-brd)}
+.btn-warning{background:var(--warning-bg);color:var(--warning);border-color:var(--warning-brd)}
+
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.2px}
+.badge-free{background:var(--success-bg);color:var(--success)}
+.badge-paid{background:var(--warning-bg);color:var(--warning)}
+.badge-live{background:var(--danger-bg);color:var(--danger)}
+.badge-muted{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border)}
+.badge-accent{background:rgba(155,140,232,.15);color:var(--accent)}
+
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--text);color:var(--bg);padding:9px 18px;border-radius:24px;font-size:14px;font-weight:500;
+  opacity:0;pointer-events:none;transition:all .25s;z-index:999;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+.empty-state{text-align:center;padding:40px 20px;color:var(--text-dim)}
+.empty-state .icon{font-size:30px;margin-bottom:8px;opacity:.6}
+.spinner{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;
+  animation:spin .7s linear infinite;margin:24px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* -------- logo -------- */
+.logo-mark{display:block;margin:0 auto;object-fit:contain;mix-blend-mode:lighten;-webkit-user-select:none;user-select:none}  /* lighten: the supplied PNG's flat #0e011d backdrop melts into the dark UI; the artwork itself is untouched */
+/* -------- startup splash (animates the supplied logo.png; nothing is redrawn) -------- */
+#tmsSplash{position:fixed;inset:0;z-index:100000;background:#0e011d;display:flex;align-items:center;justify-content:center;transition:opacity .45s ease}
+#tmsSplash.sp-out{opacity:0;pointer-events:none}
+#tmsSplash .sp-stage{position:relative;width:min(70vw,380px);aspect-ratio:840/680;opacity:0;transform:scale(.92)}
+#tmsSplash.sp-go .sp-stage{animation:spIn .7s cubic-bezier(.2,.7,.2,1) forwards}
+#tmsSplash .sp-halo{position:absolute;inset:-6%;border-radius:50%;background:radial-gradient(closest-side,rgba(139,109,240,.34),rgba(139,109,240,0) 70%);opacity:0}
+#tmsSplash.sp-go .sp-halo{animation:spHalo 2.2s ease-in-out .6s infinite alternate}
+#tmsSplash .sp-img,#tmsSplash .sp-fx{position:absolute;inset:0;width:100%;height:100%;display:block}
+#tmsSplash .sp-ring{opacity:0;transform-box:fill-box;transform-origin:center}
+#tmsSplash.sp-merge .sp-ring{animation:spRing .9s ease-out forwards}
+@keyframes spIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+@keyframes spHalo{from{opacity:.25}to{opacity:.6}}
+@keyframes spRing{from{opacity:.75;transform:scale(1)}to{opacity:0;transform:scale(2.3)}}
+#tmsSplash .sp-stage{will-change:transform,opacity}
+#tmsSplash .sp-img{opacity:0;transition:opacity .12s linear}
+#tmsSplash .sp-img.sp-ready{opacity:1}
+/* installed PWA: Android's own splash already shows the icon, so start from that icon's size (--sp-from, set by the controller), fully visible, and zoom up */
+#tmsSplash.sp-pwa .sp-stage{opacity:1;transform:scale(var(--sp-from,.68))}
+#tmsSplash.sp-pwa.sp-go .sp-stage{animation:spZoom 1s cubic-bezier(.22,.7,.2,1) forwards}
+@keyframes spZoom{from{transform:scale(var(--sp-from,.68))}to{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){#tmsSplash.sp-go .sp-halo{animation:none;opacity:.35}}   /* only the halo pulse is dropped; the zoom and the spark still play (short, under 3 s) */
+.brand-row{display:flex;flex-direction:column;align-items:center;text-align:center}
+/* soft violet glow behind the emblem on the two login screens (the logo img stays unwrapped-in-isolation so its lighten blend still sees the glow + card) */
+.logo-glow{position:relative;display:block;line-height:0}
+/* Premium login finish: the glow is a blurred copy of the supplied logo itself, so it hugs the emblem's real shape (A + orbits) instead of being a flat blob.
+   lighten blend = the artwork's flat dark backdrop never shows against the card. Static for reduce-motion users. */
+.logo-glow::before{content:"";position:absolute;inset:0;transform:scale(1.22);background:url(logo.png) center/contain no-repeat;
+  filter:blur(9px) saturate(1.8);opacity:.6;mix-blend-mode:lighten;pointer-events:none;animation:logoBreath 5.5s ease-in-out infinite alternate}
+.logo-glow .logo-mark,.brand-row .brand-name,.brand-row .brand-tagline{position:relative}   /* paint above the glow */
+@keyframes logoBreath{from{opacity:.48}to{opacity:.72}}
+@media (prefers-reduced-motion:reduce){.logo-glow::before{animation:none;opacity:.6}}
+.brand-name{font-size:22px;font-weight:600;color:#fff;letter-spacing:.2px;margin-top:8px}
+.brand-tagline{font-size:13px;color:var(--text-muted);margin-top:2px}
+
+/* -------- auth screens -------- */
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 16px}
+.auth-card{width:100%;max-width:360px;background:radial-gradient(120% 46% at 50% 0%,rgba(124,92,240,.15),rgba(124,92,240,0) 70%),var(--surface);border:1px solid var(--border-soft);
+  border-radius:20px;padding:28px 22px;box-shadow:0 28px 60px -30px rgba(0,0,0,.75),inset 0 1px 0 rgba(190,170,255,.07)}
+.auth-tabs{display:flex;gap:4px;padding:4px;background:var(--bg);border-radius:12px;margin:22px 0 18px}
+.auth-tab{flex:1;padding:9px 4px;border:none;background:none;border-radius:9px;font-size:14px;font-weight:600;
+  color:var(--text-dim);transition:all .15s}
+.auth-tab.active{background:var(--surface-2);color:#fff;border:1px solid var(--border)}
+.auth-error{background:var(--danger-bg);border:1px solid var(--danger-brd);color:var(--danger);
+  font-size:13px;padding:9px 12px;border-radius:8px;margin-bottom:12px;display:none}
+.auth-error.show{display:block}
+.auth-link{text-align:center;font-size:13px;color:var(--text-dim);margin-top:14px}
+.optional-toggle{text-align:center;font-size:13px;color:var(--accent);margin:6px 0 4px;cursor:pointer;user-select:none}
+.optional-fields{display:none;border-top:1px solid var(--border-soft);padding-top:12px;margin-top:4px}
+.optional-fields.show{display:block}
+.admin-link{position:fixed;bottom:10px;left:0;right:0;text-align:center;font-size:12px;color:var(--text-dim);
+  opacity:.6}
+
+/* -------- student shell (bottom tabs) -------- */
+.app-shell{display:flex;flex-direction:column;min-height:100vh}
+.top-header{position:sticky;top:0;z-index:20;background:rgba(18,8,28,.92);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border-soft);padding:12px 16px;display:flex;align-items:center;gap:10px}
+.top-header .logo-mark{margin:0}
+.top-header .th-name{font-size:16px;font-weight:600;flex:1}
+.content-area{flex:1;padding:16px;padding-bottom:90px;max-width:480px;margin:0 auto;width:100%}
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;background:rgba(28,16,48,.97);backdrop-filter:blur(10px);
+  border-top:1px solid var(--border-soft);display:flex;z-index:30;max-width:480px;margin:0 auto}
+.bottom-nav button{flex:1 1 auto;min-width:0;background:none;border:none;padding:9px 2px 8px;display:flex;flex-direction:column;
+  align-items:center;gap:3px;color:var(--text-dim);font-size:11px;font-weight:500}
+/* Each tab is as wide as its own label and the spare room is shared out equally, so the WHITE SPACE between neighbouring tabs is identical.
+   (Before: flex:1 gave every tab the same base width, but "Announcements" is wider than that, so it grabbed extra room and left
+   Classes / Tests / Notes with visibly uneven gaps.) Taps still cover the full bar width — there are no dead zones between tabs. */
+.bottom-nav .bn-label{display:block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bottom-nav button.active{color:var(--accent)}
+.bottom-nav .bn-icon{display:flex;align-items:center;justify-content:center}
+.bottom-nav .bn-icon svg{width:20px;height:20px}
+
+/* -------- admin shell (top tabs) -------- */
+.admin-shell{display:flex;flex-direction:column;min-height:100vh}
+.admin-header{position:sticky;top:0;z-index:20;background:rgba(18,8,28,.96);border-bottom:1px solid var(--border-soft);
+  padding:12px 16px}
+.admin-header-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.admin-content{flex:1;padding:16px;max-width:560px;margin:0 auto;width:100%}
+
+/* -------- rich content (MathJax / images / svg) -------- */
+mjx-container{color:var(--text) !important}
+
+/* -------- item lists reused across tabs -------- */
+.item-card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:13px;margin-bottom:9px}
+.item-top{display:flex;gap:10px;align-items:flex-start}
+.item-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0;background:var(--surface-2)}
+.item-info{flex:1;min-width:0}
+.item-title{font-size:15px;font-weight:600}
+.item-meta{font-size:12.5px;color:var(--text-dim);margin-top:2px;line-height:1.6}
+.item-badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.cal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-title{font-size:15.5px;font-weight:700}
+.cal-dow{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:11.5px;color:var(--text-dim);margin-bottom:4px}
+.cal-days{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:6px}
+.cal-day{position:relative;aspect-ratio:1;display:flex;align-items:center;justify-content:center;
+  border-radius:10px;font-size:13.5px;background:var(--surface);border:1px solid var(--border-soft);cursor:pointer}
+.cal-day.empty{background:none;border:none;cursor:default}
+.cal-day.cal-today{border-color:var(--accent)}
+.cal-day.cal-selected{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cal-dot{position:absolute;bottom:4px;width:4px;height:4px;border-radius:50%;background:var(--accent-bright)}
+.cal-day.cal-selected .cal-dot{background:#fff}
+.item-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+
+/* -------- modal / overlay -------- */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;display:flex;align-items:flex-end;
+  justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.overlay.open{opacity:1;pointer-events:all}
+.sheet{background:var(--bg);border-radius:20px 20px 0 0;width:100%;max-width:480px;max-height:92vh;
+  overflow-y:auto;padding:16px 16px 28px;transform:translateY(40px);transition:transform .25s;
+  border:1px solid var(--border-soft);border-bottom:none}
+.overlay.open .sheet{transform:translateY(0)}
+.sheet-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 14px}
+.sheet-close{position:sticky;top:0;float:right;background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:8px;padding:6px;font-size:13px;display:flex;align-items:center;justify-content:center}
+.sheet-close svg{width:15px;height:15px}
+
+.tab-filter{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;margin-bottom:12px}
+.tab-filter button{padding:6px 13px;border:1px solid var(--border);background:none;border-radius:20px;
+  font-size:13px;color:var(--text-dim);white-space:nowrap}
+.tab-filter.tab-wrap{flex-wrap:wrap}   /* opt-in: Published Classes' 3 tabs are wider than a phone; wrap instead of hiding "Add Live Class" off-screen */
+.tab-filter button.active{background:rgba(155,140,232,.15);color:var(--accent);border-color:var(--accent)}
+
+.search-input-wrap{position:relative;margin-bottom:10px}
+.search-input-wrap input{padding:10px 12px 10px 34px;width:100%;border-radius:var(--radius);
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);outline:none}
+.search-input-wrap input:focus{border-color:var(--accent)}
+.search-input-wrap input::placeholder{color:var(--text-dim)}
+.search-input-wrap .si{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text-dim);display:flex}
+.search-input-wrap .si svg{width:15px;height:15px}
+/* Part L — Admin -> Tests -> Published Tests filter row, compacted. Scoped to .pt-filters
+   only (see renderPublishedTestsSection), so every other search/select in the app (Notes,
+   Announcements, Results tab, etc.) is unaffected. */
+.pt-filters{margin-bottom:2px}
+.pt-filters .search-input-wrap{margin-bottom:8px}
+.pt-filters .search-input-wrap input{padding:8px 12px 8px 30px;font-size:13px}
+.pt-filters .search-input-wrap .si svg{width:13px;height:13px}
+.pt-filters select{padding:7px 9px;font-size:12.5px}
+.pt-filters .filter-toolbar{margin-bottom:4px}
+/* Part M — Admin -> Tests -> Create Test -> Manual Builder -> "Test details" card only
+   (see drawManualBuilder). The Questions card below is untouched, and .field/.row2
+   elsewhere in the app (Profile, Edit Test, video/class/note forms) are untouched. */
+.compact-fields .field{margin-bottom:8px}
+.compact-fields .field label{font-size:11.5px;margin-bottom:3px}
+.compact-fields .field input,.compact-fields .field select,.compact-fields .field textarea{padding:7px 10px;font-size:13px}
+.compact-fields .row2{gap:8px}
+
+/* -------- hamburger + drawer -------- */
+.hamburger-btn{background:none;border:none;color:var(--text);padding:9px;min-width:40px;min-height:40px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:8px}
+.hamburger-btn:active{background:var(--surface-2)}
+
+/* -------- reusable "back to dashboard" control (section 3) -------- */
+.back-btn{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text-muted);font-size:13px;font-weight:600;
+  padding:8px 14px 8px 10px;border-radius:20px;margin-bottom:14px}
+.back-btn:active{border-color:var(--accent);color:var(--text)}
+.back-btn svg{width:16px;height:16px;flex-shrink:0}
+/* Phase 1.1 — active test mode + persistent red warning */
+.overlay.tms-active{z-index:990}
+.tms-warn{position:absolute;inset:0;z-index:2000;background:rgba(70,0,0,.9);display:flex;align-items:center;justify-content:center;padding:20px}
+.tms-warn-card{background:#b91c1c;border:3px solid #fecaca;border-radius:16px;padding:22px 18px 18px;max-width:360px;width:100%;text-align:center;color:#fff;
+  box-shadow:0 0 0 6px rgba(239,68,68,.35),0 14px 44px rgba(0,0,0,.65)}
+.tms-warn-title{font-size:19px;font-weight:800;line-height:1.3;margin-bottom:12px;letter-spacing:.2px}
+.tms-warn-card p{font-size:15px;line-height:1.5;margin:0 0 8px}
+.tms-warn-ok{margin-top:12px;width:100%;padding:14px;border:none;border-radius:10px;background:#fff;color:#991b1b;font-size:16px;font-weight:800;cursor:pointer}
+.drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:150;opacity:0;pointer-events:none;
+  transition:opacity .2s}
+.drawer-overlay.open{opacity:1;pointer-events:all}
+.drawer-panel{position:absolute;top:0;left:0;bottom:0;width:78%;max-width:300px;background:var(--surface);
+  border-right:1px solid var(--border-soft);transform:translateX(-100%);transition:transform .25s;
+  display:flex;flex-direction:column;padding:18px 14px}
+.drawer-overlay.open .drawer-panel{transform:translateX(0)}
+.drawer-brand{display:flex;align-items:center;gap:10px;padding:6px 6px 16px;border-bottom:1px solid var(--border-soft);margin-bottom:10px}
+.drawer-brand .bn{font-size:16px;font-weight:700}
+.drawer-item{display:flex;align-items:center;gap:12px;padding:11px 10px;border-radius:10px;border:none;
+  background:none;color:var(--text-muted);font-size:15px;font-weight:500;text-align:left;width:100%}
+.drawer-item.active{background:rgba(155,140,232,.15);color:var(--accent)}
+.drawer-item .di-icon{width:22px;text-align:center;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
+.drawer-item .di-icon svg{width:18px;height:18px}
+.drawer-item .di-badge{margin-left:auto;background:var(--danger-bg);color:var(--danger);font-size:11px;
+  font-weight:700;padding:2px 7px;border-radius:20px}
+.drawer-divider{height:1px;background:var(--border-soft);margin:8px 4px}
+
+/* -------- admin home grid dashboard -------- */
+.home-welcome{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:18px;margin-bottom:16px}
+.home-welcome .hw-title{font-size:19px;font-weight:700}
+.home-welcome .hw-sub{font-size:13px;color:var(--text-muted);margin-top:3px}
+.home-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.home-tile{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:20px 14px;display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center;
+  position:relative;transition:border-color .15s}
+.home-tile:active{border-color:var(--accent)}
+.home-tile .ht-icon{width:44px;height:44px;border-radius:12px;background:rgba(155,140,232,.14);
+  color:var(--accent);display:flex;align-items:center;justify-content:center}
+.home-tile .ht-icon svg{width:22px;height:22px}
+.home-tile .ht-label{font-size:14px;font-weight:600;color:var(--text)}
+.home-tile .ht-badge{position:absolute;top:10px;right:10px;background:var(--danger-bg);color:var(--danger);
+  font-size:11px;font-weight:700;padding:2px 7px;border-radius:20px}
+
+/* -------- upgrade request UI -------- */
+
+/* -------- batches & enrollments -------- */
+.batch-card{background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  padding:14px;margin-bottom:9px;cursor:pointer}
+.batch-card:active{border-color:var(--accent)}
+.batch-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.batch-name{font-size:15.5px;font-weight:700}
+.batch-desc{font-size:13px;color:var(--text-dim);margin-top:2px}
+.batch-meta-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+/* Batch ⋮ actions menu + Manage Content (opt-in classes only; nothing global changes) */
+.batch-card-side{display:flex;align-items:center;gap:6px;flex:none}
+.batch-menu-btn{width:36px;height:36px;padding:0;font-size:20px;line-height:1;font-weight:700;border-radius:8px;
+  background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center}
+.batch-menu-btn:active{border-color:var(--accent)}
+/* ⋮ inside a card action row: compact square that takes its height from the row (the other buttons), instead of
+   a fixed 36px that stretched Edit / Deactivate taller. The Batches card ⋮ (not in .item-actions) is unchanged. */
+.item-actions .batch-menu-btn{width:30px;height:auto;min-height:0}
+.batch-menu-item.danger{color:var(--danger)}
+.batch-menu-item{display:flex;align-items:center;justify-content:flex-start;gap:10px;text-align:left;margin-bottom:6px}
+.mc-group-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13.5px;font-weight:700;margin:12px 0 4px}
+.mc-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-soft);cursor:pointer}
+.mc-row input[type=checkbox]{width:20px;height:20px;flex:none;margin-top:1px;accent-color:var(--accent-bright)}
+.mc-row .enroll-info{flex:1;min-width:0}
+.expiry-toggle{display:flex;gap:6px;margin-bottom:10px}
+.expiry-toggle button{flex:1;padding:8px;border:1px solid var(--border);background:var(--surface-2);
+  border-radius:var(--radius);font-size:13px;font-weight:600;color:var(--text-dim)}
+.expiry-toggle button.active{background:rgba(155,140,232,.18);color:var(--accent);border-color:var(--accent)}
+.enroll-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-soft)}
+.enroll-row:last-child{border:none}
+.enroll-info{flex:1;min-width:0}
+.enroll-name{font-size:14px;font-weight:600}
+.enroll-meta{font-size:12.5px;color:var(--text-dim);margin-top:2px}
+/* Enrolled batches (Student Details) / Enrolled students (Batch Details): info left and actions right when the
+   width allows, otherwise the actions wrap cleanly underneath instead of squeezing the name into a one-word
+   column. Opt-in via .enroll-wrap, so the other .enroll-row lists (search results etc.) are unchanged. */
+.enroll-row.enroll-wrap{flex-wrap:wrap;row-gap:8px;padding:11px 0}
+.enroll-row.enroll-wrap .enroll-info{flex:1 1 140px}
+.enroll-row.enroll-wrap .item-actions{margin-top:0;flex:0 0 auto}
+.badge-suspended{background:var(--warning-bg);color:var(--warning)}
+.badge-expired{background:var(--danger-bg);color:var(--danger)}
+
+/* -------- dashboard promotional banner carousel -------- */
+.banner-carousel-wrap{margin:0 0 12px}
+.banner-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;
+  -webkit-overflow-scrolling:touch;padding:2px 3px 6px;scrollbar-width:none}
+.banner-track::-webkit-scrollbar{display:none}
+.banner-slide{flex:0 0 100%;scroll-snap-align:center;aspect-ratio:16/9;border-radius:16px;
+  overflow:hidden;box-shadow:0 8px 22px rgba(0,0,0,.35);background:var(--surface-2)}
+.banner-slide img{width:100%;height:100%;object-fit:cover;display:block}
+.banner-dots{display:flex;justify-content:center;gap:6px;margin-top:8px}
+.banner-dot{width:6px;height:6px;border-radius:50%;background:var(--border);transition:background .2s,width .2s}
+.banner-dot.active{background:var(--accent);width:16px;border-radius:4px}
+
+@media(min-width:481px){
+  .content-area,.bottom-nav{max-width:480px}
+}
+
+/* Defensive only: printing is triggered from inside the test player's own iframe (its own
+   @media print rules do the real work), which normally means this outer page is never part of
+   what gets printed at all. This just hides the persistent app chrome in the rare case a browser
+   prints the parent frame instead. */
+@media print{
+  .top-header,.bottom-nav,.admin-header,.drawer,.tms-frame-bar{display:none !important}
+}
+
+/* ============================================================
+   PREMIUM POLISH LAYER (UI only — no logic, no DOM/class changes)
+   Loaded last so it refines the base styles above. Existing
+   variable names, classes and the dark/purple theme are kept.
+   ============================================================ */
+:root{
+  --surface-3:#2d1b48;
+  --hdr-h:60px;
+  --side-w:236px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35),0 4px 14px -6px rgba(0,0,0,.45);
+  --shadow-md:0 2px 4px rgba(0,0,0,.3),0 12px 28px -10px rgba(0,0,0,.6);
+  --ring:0 0 0 3px rgba(155,140,232,.22);
+  --glass:rgba(20,10,34,.78);
+}
+html{scrollbar-color:#3a2a5c transparent;-webkit-text-size-adjust:100%}
+body{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:#3a2a5c;border-radius:10px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+button:focus-visible,a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---- cards & lists ---- */
+.card,.item-card,.batch-card,.home-tile,.home-welcome{
+  background:linear-gradient(180deg,rgba(190,170,255,.035),rgba(190,170,255,0) 55%),var(--surface);
+  box-shadow:var(--shadow-sm),inset 0 1px 0 rgba(190,170,255,.05);
+  transition:border-color .15s,box-shadow .15s,transform .15s}
+.card{padding:14px;border-radius:16px}
+.card-title{font-weight:650;letter-spacing:-.1px}
+.item-card{padding:12px 13px;margin-bottom:8px}
+.item-icon{background:linear-gradient(135deg,rgba(155,140,232,.2),rgba(127,119,221,.07));border:1px solid rgba(155,140,232,.16)}
+.item-title{font-weight:650;letter-spacing:-.1px;line-height:1.35}
+.item-meta{line-height:1.5}
+.item-actions{gap:6px}
+.home-welcome{background:radial-gradient(120% 150% at 0 0,rgba(124,92,240,.24),rgba(124,92,240,0) 62%),var(--surface);padding:16px 18px}
+.home-welcome .hw-title{letter-spacing:-.2px}
+.home-tile{padding:18px 12px}
+.home-tile .ht-icon{background:linear-gradient(135deg,rgba(155,140,232,.28),rgba(127,119,221,.08));border:1px solid rgba(155,140,232,.2)}
+.stat-tile,.q-stat-card{border-radius:12px;background:linear-gradient(180deg,rgba(190,170,255,.04),rgba(190,170,255,0)),var(--surface-2);border-color:var(--border-soft)}
+.stat-val{letter-spacing:-.3px}
+.banner-slide{border:1px solid var(--border-soft);box-shadow:var(--shadow-md)}
+.cal-day{border-radius:11px;transition:border-color .15s,background .15s}
+.cal-day.cal-selected{background:linear-gradient(180deg,#9a92ee,#7f77dd);box-shadow:0 6px 14px -6px rgba(127,119,221,.7)}
+@media(hover:hover){
+  .item-card:hover,.batch-card:hover,.home-tile:hover{border-color:var(--border);box-shadow:var(--shadow-md),inset 0 1px 0 rgba(190,170,255,.07)}
+  .batch-card:hover,.home-tile:hover{transform:translateY(-1px)}
+  .cal-day:not(.empty):hover{border-color:var(--accent)}
+}
+
+/* ---- buttons, badges, inputs, chips ---- */
+.btn{min-height:44px;padding:10px 14px;border-radius:12px;letter-spacing:.1px;transition:transform .12s,opacity .15s,background .15s,border-color .15s}
+.btn:active,.btn-sm:active{transform:scale(.985)}
+.btn-sm{padding:7px 12px;min-height:32px;border-radius:10px;font-weight:600;transition:transform .12s,opacity .15s,background .15s,border-color .15s}
+.btn-primary{background:linear-gradient(180deg,#9a92ee,#7f77dd);color:#150a1f;
+  box-shadow:0 8px 18px -8px rgba(127,119,221,.75),inset 0 1px 0 rgba(255,255,255,.28)}
+.btn-ghost:hover,.btn-danger:hover,.btn-success:hover,.btn-warning:hover{filter:brightness(1.12)}
+.btn-ghost{background:linear-gradient(180deg,rgba(190,170,255,.05),rgba(190,170,255,0)),var(--surface-2)}
+.badge{font-size:10.5px;padding:3px 9px;letter-spacing:.3px}
+.badge-free{box-shadow:inset 0 0 0 1px var(--success-brd)}
+.badge-paid{box-shadow:inset 0 0 0 1px var(--warning-brd)}
+.badge-live{box-shadow:inset 0 0 0 1px var(--danger-brd)}
+.badge-accent{box-shadow:inset 0 0 0 1px rgba(155,140,232,.3)}
+.field input,.field select,.field textarea,select,.search-input-wrap input{border-radius:12px;transition:border-color .15s,box-shadow .15s}
+.field input:focus,.field select:focus,.field textarea:focus,select:focus,.search-input-wrap input:focus{border-color:var(--accent);box-shadow:var(--ring)}
+.field label{letter-spacing:.1px}
+.tab-filter{scrollbar-width:none}
+.tab-filter::-webkit-scrollbar{display:none}
+.tab-filter button{padding:7px 14px;background:var(--surface);transition:background .15s,color .15s,border-color .15s}
+.tab-filter button.active{background:rgba(155,140,232,.18);box-shadow:inset 0 0 0 1px rgba(155,140,232,.25)}
+.back-btn{background:var(--surface);transition:border-color .15s,color .15s}
+.auth-card{box-shadow:0 30px 70px -30px rgba(0,0,0,.8),inset 0 1px 0 rgba(190,170,255,.08)}
+.auth-tab.active{box-shadow:var(--shadow-sm)}
+
+/* ---- header, bottom nav, drawer ---- */
+.top-header{height:var(--hdr-h);padding:0 14px;background:var(--glass);
+  -webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);border-bottom:1px solid rgba(124,92,240,.16)}
+.top-header .th-name{font-weight:700;letter-spacing:.2px}
+.admin-header{background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);
+  border-bottom:1px solid rgba(124,92,240,.16);padding:10px 16px}
+.admin-header-row{margin-bottom:0}
+.content-area{padding-bottom:calc(88px + env(safe-area-inset-bottom,0px))}
+.bottom-nav{background:rgba(22,12,38,.88);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);
+  border-top:1px solid rgba(124,92,240,.16);padding-bottom:env(safe-area-inset-bottom,0px)}
+.bottom-nav button{padding:8px 2px 7px;gap:2px;font-weight:600;letter-spacing:.1px;transition:color .15s}
+.bottom-nav .bn-icon{width:46px;height:27px;border-radius:14px;transition:background .18s}
+.bottom-nav button.active .bn-icon{background:rgba(155,140,232,.18)}
+.drawer-panel{background:linear-gradient(180deg,#1f1235,var(--surface));box-shadow:24px 0 60px -20px rgba(0,0,0,.7)}
+.drawer-item{border-radius:12px;padding:11px 12px;transition:background .15s,color .15s}
+.drawer-item:hover{background:var(--surface-2);color:var(--text)}
+.drawer-item.active{box-shadow:inset 3px 0 0 var(--accent)}
+.drawer-brand .bn{letter-spacing:.2px}
+
+/* ---- sheets / overlays ---- */
+.overlay{background:rgba(8,3,16,.72)}
+.sheet{background:linear-gradient(180deg,#1b102d,var(--bg));border-radius:22px 22px 0 0;box-shadow:0 -24px 60px -24px rgba(0,0,0,.75)}
+.sheet-handle{width:40px;background:#4a3875}
+.sheet-close{border-radius:10px}
+.toast{background:rgba(243,240,250,.97);border-radius:14px;box-shadow:var(--shadow-md)}
+.empty-state{padding:44px 20px}
+
+/* ---- tablet ---- */
+@media(min-width:768px) and (max-width:1023px){
+  .content-area,.bottom-nav{max-width:640px}
+}
+/* ---- desktop: centred, roomier dialogs ---- */
+@media(min-width:768px){
+  .overlay{align-items:center}
+  .sheet{max-width:640px;max-height:88vh;border-radius:22px;border-bottom:1px solid var(--border-soft);
+    box-shadow:var(--shadow-md);transform:translateY(12px) scale(.985)}
+  .overlay.open .sheet{transform:none}
+  .toast{bottom:32px}
+}
+/* ---- desktop: student left sidebar + wide content ---- */
+@media(min-width:1024px){
+  .top-header{padding:0 22px}
+  .bottom-nav{top:var(--hdr-h);bottom:0;left:0;right:auto;width:var(--side-w);max-width:none;margin:0;
+    flex-direction:column;justify-content:flex-start;gap:4px;padding:18px 12px;
+    border-top:none;border-right:1px solid var(--border-soft);background:rgba(22,12,38,.92)}
+  .bottom-nav button{flex:none;width:100%;flex-direction:row;justify-content:flex-start;gap:12px;
+    padding:11px 14px;font-size:14px;border-radius:12px}
+  .bottom-nav .bn-icon{width:auto;height:auto;background:none !important}
+  .bottom-nav .bn-icon svg{width:20px;height:20px}
+  .bottom-nav .bn-label{overflow:visible;text-overflow:clip}
+  .bottom-nav button:hover{background:var(--surface-2);color:var(--text)}
+  .bottom-nav button.active{background:rgba(155,140,232,.14);box-shadow:inset 3px 0 0 var(--accent)}
+  .content-area{max-width:none;width:auto;margin:0 0 0 var(--side-w);padding:28px 40px 56px}
+  .content-area>*{max-width:1040px;margin-left:auto;margin-right:auto}
+  .toast{left:calc(50% + var(--side-w)/2)}
+}
+/* ---- desktop: admin wide layout ---- */
+@media(min-width:900px){
+  .admin-header{padding:10px 32px}
+  .admin-header-row,.admin-content{max-width:1080px;margin-left:auto;margin-right:auto}
+  .admin-content{padding:28px 32px 56px}
+  .home-grid{grid-template-columns:repeat(3,1fr);gap:16px}
+  .stat-grid{grid-template-columns:repeat(4,1fr);gap:10px}
+}
+@media(min-width:1200px){
+  .home-grid{grid-template-columns:repeat(4,1fr)}
+}
+@media (prefers-reduced-motion:reduce){
+  .card,.item-card,.batch-card,.home-tile,.btn,.btn-sm,.sheet{transition:none}
+}
